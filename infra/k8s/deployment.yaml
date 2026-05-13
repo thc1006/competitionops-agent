@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: competitionops-api
+  namespace: competitionops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: competitionops-api
+  template:
+    metadata:
+      labels:
+        app: competitionops-api
+    spec:
+      containers:
+        - name: api
+          image: competitionops-agent:dev
+          ports:
+            - containerPort: 8000
+          env:
+            - name: APP_ENV
+              value: "staging"
+            - name: DRY_RUN_DEFAULT
+              value: "true"
+            - name: APPROVAL_REQUIRED
+              value: "true"

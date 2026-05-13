@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: competitionops
+      POSTGRES_PASSWORD: competitionops
+      POSTGRES_DB: competitionops
+    ports:
+      - "5432:5432"
+    volumes:
+      - competitionops_pg:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    env_file:
+      - ../../.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+volumes:
+  competitionops_pg:
