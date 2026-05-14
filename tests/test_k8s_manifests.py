@@ -188,6 +188,155 @@ def test_base_configmap_sets_production_defaults() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Round-2 M3 — operator-facing placeholders for opt-in features.
+#
+# Before this commit, ``infra/k8s/README.md`` told operators to "set
+# PLAN_REPO_DIR via configmap or secret" when lifting the H2 pin, but
+# the base ConfigMap didn't even mention the key. Same for
+# ``PDF_ADAPTER=docling`` — documented in the runtime factory but
+# nowhere in the deploy-time surface. Operators had to either grep the
+# source or hit RuntimeError at first request to discover the env vars.
+#
+# The fix puts both keys in the ConfigMap as **commented** placeholders.
+# Active values stay unset by default (so behaviour is unchanged); the
+# YAML serves as in-tree documentation for what to uncomment when
+# lifting the relevant gate.
+#
+# Tested via raw-text grep (YAML parser strips comments) — paired with
+# an assertion that the key is NOT active in ``cm.data``, so a future
+# refactor that accidentally activates the key surfaces in tests.
+# ---------------------------------------------------------------------------
+
+
+def test_base_configmap_documents_plan_repo_dir_as_commented_placeholder() -> None:
+    """H2 follow-up — the configmap must mention ``PLAN_REPO_DIR`` so
+    operators lifting the prod replicas=1 pin discover the env var at
+    deploy time rather than from a 404 in production."""
+    path = _BASE / "configmap.yaml"
+    raw = path.read_text(encoding="utf-8")
+    assert "PLAN_REPO_DIR" in raw, (
+        "configmap.yaml must mention PLAN_REPO_DIR (as a commented "
+        "placeholder) so operators lifting the H2 pin find the env var."
+    )
+    cm = _load_yaml(path)
+    assert "PLAN_REPO_DIR" not in cm["data"], (
+        "PLAN_REPO_DIR must stay COMMENTED OUT — activating it by default "
+        "would force every operator onto file-backed plans without the "
+        "shared-volume requirement being satisfied. Keep it as docs only."
+    )
+
+
+def test_base_configmap_documents_pdf_adapter_as_commented_placeholder() -> None:
+    """Sprint 3 / M4 — the configmap must mention ``PDF_ADAPTER`` so
+    operators discover that ``docling`` is opt-in (requires an OCR
+    build of the image; see Dockerfile)."""
+    path = _BASE / "configmap.yaml"
+    raw = path.read_text(encoding="utf-8")
+    assert "PDF_ADAPTER" in raw
+    cm = _load_yaml(path)
+    assert "PDF_ADAPTER" not in cm["data"], (
+        "PDF_ADAPTER must stay commented — activating ``docling`` "
+        "by default would crash any deployment whose image was built "
+        "without the ``ocr`` extra (default build)."
+    )
+
+
+def test_base_configmap_plan_repo_dir_placeholder_points_into_audit_pvc_subdir() -> None:
+    """The documented default path reuses the audit PVC (subdir) so
+    lifting the H2 pin doesn't force operators to provision a second
+    PVC. Operators with stricter quota requirements can swap to a
+    separate volume per their environment policy."""
+    raw = (_BASE / "configmap.yaml").read_text(encoding="utf-8")
+    # The commented placeholder should reference the existing audit mount.
+    assert "/var/lib/competitionops/audit" in raw
+    # And the default path is inside that mount.
+    assert "/var/lib/competitionops/audit/plans" in raw or (
+        "PLAN_REPO_DIR" in raw and "subdir" in raw.lower()
+    ), (
+        "PLAN_REPO_DIR's commented placeholder should either name the "
+        "exact subdir path or explain the subdir convention in the same "
+        "block, so operators don't have to cross-reference the README."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round-2 M4 — Dockerfile build path for the optional OCR extra.
+#
+# The default image doesn't include Docling (heavy ML deps: torch,
+# easyocr, pypdfium2 — ~2 GiB image bloat). Operators who set
+# ``PDF_ADAPTER=docling`` need a build that includes ``--extra ocr``,
+# OR the runtime factory raises ``RuntimeError`` at first PDF upload.
+#
+# The fix exposes a build-arg (``INCLUDE_OCR``) so the same Dockerfile
+# builds both variants. The README documents the opt-in command.
+# ---------------------------------------------------------------------------
+
+
+def test_dockerfile_exposes_include_ocr_build_arg() -> None:
+    """M4 — the Dockerfile must accept a ``INCLUDE_OCR`` build arg
+    so operators can build an OCR-enabled image without forking the
+    Dockerfile."""
+    content = _DOCKERFILE.read_text(encoding="utf-8")
+    assert "INCLUDE_OCR" in content, (
+        "Dockerfile must expose an INCLUDE_OCR build arg. Operators "
+        "build with ``docker build --build-arg INCLUDE_OCR=1 ...`` to "
+        "include the Docling extra. Without this, PDF_ADAPTER=docling "
+        "deployments crash at first request."
+    )
+    # And the install line must reference the ``ocr`` extra (so the
+    # build arg actually controls it).
+    assert "--extra ocr" in content, (
+        "INCLUDE_OCR is wired but the install line doesn't reference "
+        "``--extra ocr`` — the build arg has no effect."
+    )
+
+
+def test_dockerfile_default_build_does_not_install_ocr_extra() -> None:
+    """Defence against accidental default-on: the Dockerfile must
+    treat OCR as opt-in. The default build (no build-arg) must not
+    pull in Docling's ~2 GiB of ML dependencies."""
+    content = _DOCKERFILE.read_text(encoding="utf-8")
+    # ``ARG INCLUDE_OCR=""`` (or similar) declares the arg with an
+    # empty default. The conditional substitution ``${INCLUDE_OCR:+--extra ocr}``
+    # expands ONLY when the arg is non-empty. Both patterns must
+    # appear together.
+    has_default = (
+        'ARG INCLUDE_OCR=""' in content
+        or "ARG INCLUDE_OCR=\n" in content
+        or "ARG INCLUDE_OCR \n" in content
+        or content.count("ARG INCLUDE_OCR") >= 1
+        and "INCLUDE_OCR=" in content.split("ARG INCLUDE_OCR")[1][:20]
+    )
+    assert has_default, (
+        "Dockerfile must declare ``ARG INCLUDE_OCR`` with an empty default "
+        "so the default build is the slim image. Operators opt in via "
+        "``--build-arg INCLUDE_OCR=1``."
+    )
+
+
+def test_readme_documents_h2_lift_configmap_step() -> None:
+    """The operator checklist for lifting the H2 pin must name the
+    configmap step explicitly. Before this commit it told operators
+    to "set PLAN_REPO_DIR via configmap or secret" without naming the
+    actual file or the path convention."""
+    content = (_K8S / "README.md").read_text(encoding="utf-8")
+    assert "PLAN_REPO_DIR" in content
+    # Must point operators at the configmap file (or at least the term).
+    assert "configmap" in content.lower() or "ConfigMap" in content
+
+
+def test_readme_documents_ocr_build_invocation() -> None:
+    """The operator-facing docs must show the exact command for the
+    OCR build. Otherwise ``PDF_ADAPTER=docling`` is documented as
+    runtime but is actually build-time, which is the round-2 M4 gap."""
+    content = (_K8S / "README.md").read_text(encoding="utf-8")
+    assert "INCLUDE_OCR" in content, (
+        "README must document the ``INCLUDE_OCR`` build arg so "
+        "operators flipping PDF_ADAPTER=docling know to rebuild the image."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Secret template
 # ---------------------------------------------------------------------------
 

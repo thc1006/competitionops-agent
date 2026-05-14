@@ -13,6 +13,30 @@ data:
   # in deployment.yaml (or the emptyDir in the dev overlay).
   AUDIT_LOG_DIR: /var/lib/competitionops/audit
 
+  # H2 follow-up — uncomment when lifting the prod ``replicas: 1`` pin.
+  # Plans persist as one JSON file per plan_id under this path. The
+  # documented default reuses the audit PVC as a subdir so lifting the
+  # pin needs ZERO infra changes (no second PVC, no second volumeMount).
+  # Operators with stricter quota isolation can provision a separate
+  # PVC and point this at its mount path instead.
+  #
+  # PREREQUISITES (see infra/k8s/README.md "H2 — operator checklist"):
+  #   1. H3 fix shipped in the image (file_audit.py uses
+  #      <plan_id>.<writer_id>.jsonl) — required for multi-replica.
+  #   2. Bump replicas in overlays/prod/deployment-patch.yaml.
+  #
+  # PLAN_REPO_DIR: /var/lib/competitionops/audit/plans
+
+  # P2-005 Sprint 3 — switch the PDF parser engine. Default (unset /
+  # empty) keeps the byte-decode mock; ``docling`` switches to the
+  # real layout-aware parser. REQUIRES the image to have been built
+  # with the OCR extra:
+  #   docker build --build-arg INCLUDE_OCR=1 -f infra/docker/Dockerfile .
+  # Without an OCR build, the runtime factory raises RuntimeError at
+  # the first PDF upload. See infra/k8s/README.md "Enabling Docling".
+  #
+  # PDF_ADAPTER: docling
+
   # OTel — overlays set OTEL_EXPORTER_OTLP_ENDPOINT to the cluster's
   # collector. Without it, Sprint 6 wiring stays silent (Proxy
   # MeterProvider, no exporter attached).
