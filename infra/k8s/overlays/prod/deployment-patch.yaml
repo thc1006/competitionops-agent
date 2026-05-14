@@ -12,18 +12,25 @@ spec:
   # the LB lands the approval on a different pod than the one that
   # handled ``POST /plans/generate``.
   #
-  # The ``FilePlanRepository`` adapter is now shipped — operators can
-  # opt in by mounting a shared volume and setting
-  # ``PLAN_REPO_DIR=/path/on/the/shared/volume`` (mirrors Tier 0 #4's
-  # ``AUDIT_LOG_DIR``). HOWEVER, lifting this pin ALSO requires the H3
-  # fix (multi-writer safety for ``FileAuditLog`` appends — currently
-  # dormant because replicas=1 means a single writer). Bumping
-  # replicas WITHOUT H3 in place will torn-write the JSONL audit log
-  # under concurrent execution. The pin stays at 1 until BOTH:
-  #   1. Operators have wired PLAN_REPO_DIR onto a shared volume.
-  #   2. H3 is closed (FileAuditLog flock or per-pod filenames).
-  # Once both are in place, this number can go back to 3 and the
-  # ``podAntiAffinity`` block below starts doing real work.
+  # Both halves of the dependency are now shipped in-tree:
+  #
+  #   1. ``FilePlanRepository`` — opted in via
+  #      ``PLAN_REPO_DIR=/path/on/the/shared/volume`` (mirrors Tier 0
+  #      #4's ``AUDIT_LOG_DIR``). Atomic-rename save means multi-pod
+  #      readers see only complete files.
+  #   2. H3 closed — ``FileAuditLog`` now writes to
+  #      ``<plan_id>.<writer_id>.jsonl`` (writer_id defaults to the
+  #      pod's hostname / ``metadata.name``), so each pod owns its
+  #      own file. No shared resource ⇒ no torn-write risk regardless
+  #      of RWX filesystem semantics. ``list_for_plan`` merges across
+  #      all writers (and the legacy ``<plan_id>.jsonl`` form, for
+  #      in-place upgrades).
+  #
+  # The pin nevertheless stays at 1 as a deployment-policy default —
+  # operators MUST flip ``PLAN_REPO_DIR`` on first, confirm the build
+  # contains the H3 fix in ``adapters/file_audit.py``, then bump this
+  # number. The ``podAntiAffinity`` block below activates the moment
+  # replicas climbs.
   replicas: 1
   template:
     spec:

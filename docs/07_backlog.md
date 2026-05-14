@@ -211,6 +211,26 @@ sanitisation / two-instance cross-pod simulation / FastAPI full
 lifecycle with simulated pod restart. **Pin stays at replicas=1** —
 lifting it also requires the H3 audit-log multi-writer fix.
 
+**H3 (2026-05-14) closed** — ``FileAuditLog`` now writes one file per
+``(plan_id, writer_id)`` instead of a single shared
+``<plan_id>.jsonl``. Filename format becomes
+``<plan_id>.<writer_id>.jsonl`` where ``writer_id`` defaults to
+``socket.gethostname()`` — in a k8s pod that's ``metadata.name``, so
+each pod automatically owns its own file with zero extra wiring.
+Because writers no longer share a file, the multi-writer torn-write
+race the deep review flagged is impossible *by construction*
+regardless of RWX filesystem semantics (no reliance on ``fcntl.flock``
+which has unreliable behaviour on NFS / Azure Files / EFS).
+``list_for_plan`` globs ``<plan_id>.*.jsonl`` and merges across
+writers, plus picks up the legacy ``<plan_id>.jsonl`` form for
+in-place upgrades. 8 new tests cover: writer_id defaults to hostname /
+explicit writer_id in filename / two writers two files / merge across
+writers / no leak across plan_ids / 300-record multi-writer volume
+test / writer_id path-traversal sanitisation / legacy single-file
+backward compat. Pin stays at replicas=1 as deployment-policy default
+— lifting it is now a one-line manifest change once operators wire
+``PLAN_REPO_DIR``.
+
 ### P2-004 — Observability with OpenTelemetry
 
 Status: **In Progress** — Sprint 0 (tracer bootstrap) ✅, Sprint 2
