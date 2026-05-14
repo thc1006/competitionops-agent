@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: competitionops-dev
+
+resources:
+  - ../../base
+
+# Dev: 1 replica, no PVC (emptyDir loses audit on restart but skips
+# the RWX storage-class requirement so this overlay works on minikube
+# / kind / Docker Desktop out of the box).
+patches:
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: competitionops-api
+
+# Don't apply the PVC manifest in dev — emptyDir replaces it via the
+# deployment-patch.
+patchesStrategicMerge: []
+
+# Image tag pinned to a local build for dev.
+images:
+  - name: gcr.io/distroless/python3-debian12
+    newName: competitionops/api
+    newTag: dev

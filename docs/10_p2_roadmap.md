@@ -38,7 +38,7 @@
 | **P2-004** | OpenTelemetry observability | 6 | 3–5 d | — | 待辦 |
 | **P2-001** | LangGraph workflow + interrupt | 6 | 5–7 d | P2-004（建議） | ✅ Done (2026-05-14, 11 tests) |
 | **P2-005** | OCR / PDF ingestion | 5 (+1 GPU) | 5–7 d | Tier 0 #1（drive 路徑） | 待辦 |
-| **P2-003** | Kubernetes deployment | 6 | 5–10 d | Tier 0 #2 + #4 | 待辦 |
+| **P2-003** | Kubernetes deployment | 6 | 5–10 d | Tier 0 #2 + #4 | ✅ Done (2026-05-14, 28 tests) |
 | **P2-002** | Windmill workflow scripts | 4 | 2–3 d | — | ✅ Done (2026-05-14, 8 tests) |
 
 合計：27 sprints / 約 3–5 週 solo full-time / 約 6 個月 solo 1 天每週。
@@ -448,3 +448,4 @@ bash scripts/verify.sh
 | 2026-05-14 | Tier 0 #5 query-then-create idempotency；Plane real adapter GET-then-POST；5 條新測試；fall-through 容錯 | Claude Code |
 | 2026-05-14 | P2-001 LangGraph workflow；5 nodes + interrupt + MemorySaver；11 條測試（Sprint 0-5 全綠） | Claude Code |
 | 2026-05-14 | P2-002 Windmill scripts；3 個 rawscript + flow YAML + README；8 條測試（MockTransport+TestClient） | Claude Code |
+| 2026-05-14 | P2-003 K8s deployment；kustomize base + dev/staging/prod overlays + distroless Dockerfile；28 條測試 | Claude Code |

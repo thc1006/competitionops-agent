@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: competitionops-audit
+  namespace: competitionops
+  labels:
+    app.kubernetes.io/name: competitionops
+    app.kubernetes.io/component: audit-log
+spec:
+  # ReadWriteMany so multi-replica deployments (prod) can all append
+  # to the same per-plan JSONL files. Concrete storage class depends
+  # on the cluster — set ``storageClassName`` in the overlay if your
+  # cluster does not have a default RWX class.
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi

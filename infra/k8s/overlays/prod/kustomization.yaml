@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: competitionops-prod
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+patches:
+  - path: deployment-patch.yaml
+    target:
+      kind: Deployment
+      name: competitionops-api
+
+images:
+  - name: gcr.io/distroless/python3-debian12
+    newName: competitionops/api
+    newTag: prod

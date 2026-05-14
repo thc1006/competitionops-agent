@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: competitionops-api
+spec:
+  # Prod: 3 replicas behind the LB. PVC must be ReadWriteMany so all
+  # three pods can append to the same per-plan JSONL files.
+  replicas: 3
+  template:
+    spec:
+      affinity:
+        # Spread replicas across nodes for blast-radius reduction.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: competitionops
+                    app.kubernetes.io/component: api
+                topologyKey: kubernetes.io/hostname

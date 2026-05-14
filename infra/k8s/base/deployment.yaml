@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: competitionops-api
+  namespace: competitionops
+  labels:
+    app.kubernetes.io/name: competitionops
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: competitionops
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: competitionops
+        app.kubernetes.io/component: api
+    spec:
+      # Pod-level security: nonroot uid, read-only root, no proc mount.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      containers:
+        - name: api
+          image: gcr.io/distroless/python3-debian12:nonroot
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: competitionops-config
+            - secretRef:
+                name: competitionops-secrets
+          # Probes hit the two health endpoints exposed by main.py.
+          # ``/healthz`` is the k8s-style liveness path; ``/health`` is
+          # the alias used for ready checks. Both 200 → fine; non-200
+          # triggers restart / unready respectively.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          # Container-level security: no privilege escalation, drop
+          # every Linux capability, read-only root fs (writable only at
+          # explicit volumeMounts).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: audit-log
+              mountPath: /var/lib/competitionops/audit
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # ``audit-log`` is replaced with emptyDir in dev overlay; prod
+        # overlay keeps the PVC. Tier 0 #4 (FileAuditLog) writes
+        # ``AUDIT_LOG_DIR=/var/lib/competitionops/audit/<plan_id>.jsonl``
+        # into this mount.
+        - name: audit-log
+          persistentVolumeClaim:
+            claimName: competitionops-audit
+        # The readOnlyRootFilesystem container needs writable /tmp for
+        # any incidental temp files (httpx, OTel, etc.).
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

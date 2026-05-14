@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: competitionops-api
+spec:
+  replicas: 1
+  template:
+    spec:
+      volumes:
+        # Dev: swap PVC for an emptyDir so the overlay works without
+        # an RWX storage class. Audit log doesn't survive pod restart,
+        # but that's acceptable for dev iteration.
+        - name: audit-log
+          $patch: replace
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

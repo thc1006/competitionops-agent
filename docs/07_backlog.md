@@ -133,6 +133,23 @@ exercised both individually and as a composed pipeline.
 
 ### P2-003 — Kubernetes deployment
 
+Status: **Done (2026-05-14)** — Kustomize base (namespace + deployment
++ service + configmap + secret.template + pvc) plus three overlays
+(dev / staging / prod). Hardened pod posture: distroless
+``python3-debian12:nonroot`` image, uid 65532, dropped ALL caps,
+read-only root fs, automountServiceAccountToken=false, RuntimeDefault
+seccomp, readinessProbe on ``/health`` + livenessProbe on
+``/healthz``. PVC ``competitionops-audit`` (5Gi RWX) backs Tier 0 #4's
+``AUDIT_LOG_DIR``; dev overlay swaps PVC for emptyDir for minikube /
+kind without RWX. Prod overlay: 3 replicas + podAntiAffinity + nginx
+ingress with cert-manager letsencrypt-prod + 20rps rate limit.
+Staging: same shape with letsencrypt-staging. ``secret.template.yaml``
+ships with seven empty key placeholders — real values flow via
+external-secrets / sealed-secrets / kubectl. Multi-stage Dockerfile
+builds with uv into a distroless runtime. 28 manifest tests parse YAML
+directly (no kustomize CLI dep), 29th smoke test calls
+``kustomize build`` per overlay if the binary is available.
+
 ### P2-004 — Observability with OpenTelemetry
 
 Status: **In Progress** — Sprint 0 (tracer bootstrap) ✅, Sprint 2

@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: competitionops-staging
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+images:
+  - name: gcr.io/distroless/python3-debian12
+    newName: competitionops/api
+    newTag: staging
+
+# Staging keeps the PVC from base — same storage shape as prod so
+# RWX storage-class issues surface here instead of in prod.

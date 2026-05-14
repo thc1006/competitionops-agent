@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: competitionops-api
+  namespace: competitionops-prod
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # Light rate limiting at the ingress to throttle accidental loops
+    # before they hit the planner.
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - competitionops.example.invalid
+      secretName: competitionops-prod-tls
+  rules:
+    - host: competitionops.example.invalid
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: competitionops-api
+                port:
+                  name: http
