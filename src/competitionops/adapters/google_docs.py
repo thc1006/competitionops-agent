@@ -97,15 +97,17 @@ class GoogleDocsAdapter:
     def real_mode(self) -> bool:
         """Real REST mode is enabled iff ``google_oauth_access_token`` is set.
 
-        ``google_docs_api_base`` defaults to the prod URL and is validated
-        as non-empty at Settings construction (the URL validator rejects
-        ``""`` / ``None``), so it is never falsy at runtime — it is a
-        configuration knob (operators staging against a Docs-emulator
-        override it), not a gate. Earlier revisions wrote this as
+        ``google_docs_api_base`` defaults to the prod URL and is
+        non-empty at Settings construction (Pydantic's ``str`` type
+        check rejects ``None``; the URL validator raises on ``""``),
+        so it is never falsy at runtime — it is a configuration knob
+        (operators staging against a Docs-emulator override it), not
+        a gate. Earlier revisions wrote this as
         ``bool(token) and bool(base)``, implying both were required;
         the second clause was dead code (review issue 1). The single-
         condition form below matches the actual contract operators
-        observe.
+        observe. Pinned structurally by
+        ``test_real_mode_property_does_not_reference_api_base_attribute``.
         """
         return bool(self.settings.google_oauth_access_token)
 

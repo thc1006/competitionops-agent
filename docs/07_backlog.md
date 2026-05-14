@@ -130,7 +130,24 @@ so the suite stays offline.
 
 ### P1-002 — Google Sheets real adapter
 
+When this lands, follow the **bearer-only** ``real_mode`` pattern that
+Drive (P1-005) and Docs (P1-001) settled on after issue-1 cleanup —
+i.e. ``return bool(self.settings.google_oauth_access_token)`` only.
+Do NOT AND in ``bool(self.settings.google_sheets_api_base)``: when the
+base field has a non-empty prod-URL default + the standard URL
+validator, the second clause is always True at runtime (dead code that
+misleads future readers). The structural guard
+``test_real_mode_property_does_not_reference_api_base_attribute`` in
+``tests/test_google_workspace_adapters.py`` already enforces this for
+Drive + Docs; extend that tuple when Sheets graduates to real mode.
+
 ### P1-003 — Google Calendar real adapter
+
+Same ``real_mode`` pattern as P1-002 above — bearer-only gate.
+Calendar's API base will live alongside Drive / Docs / Sheets bases
+in Settings with a prod-URL default and the standard URL validator,
+so the dead-clause trap applies identically. Extend the AST guard
+tuple when Calendar lands.
 
 ### P1-004 — Plane REST adapter
 
