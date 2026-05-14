@@ -3,10 +3,9 @@ import os
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.adapters.registry import AdapterRegistry
 from competitionops.config import Settings, get_settings
-from competitionops.ports import AuditLogPort, PlanRepository
+from competitionops.ports import AuditLogPort, PdfIngestionPort, PlanRepository
 from competitionops.schemas import (
     ActionPlan,
     ApprovalDecision,
@@ -151,7 +150,12 @@ FastAPIInstrumentor.instrument_app(app)
 # function object, same lru_cache, so existing test fixtures that do
 # ``main_module._plan_repo.cache_clear()`` keep targeting the canonical
 # cache and don't accidentally clear a parallel singleton.
-from competitionops.runtime import _audit_log, _plan_repo, _registry  # noqa: E402
+from competitionops.runtime import (  # noqa: E402
+    _audit_log,
+    _pdf_adapter,
+    _plan_repo,
+    _registry,
+)
 
 
 def get_plan_repo() -> PlanRepository:
@@ -164,6 +168,13 @@ def get_audit_log() -> AuditLogPort:
 
 def get_registry() -> AdapterRegistry:
     return _registry()
+
+
+def get_pdf_adapter() -> PdfIngestionPort:
+    """FastAPI dependency that resolves the PDF parser engine via
+    ``runtime._pdf_adapter()`` (deep-review M6). Test fixtures inject
+    stubs by overriding this in ``app.dependency_overrides``."""
+    return _pdf_adapter()
 
 
 def get_execution_service(
@@ -233,13 +244,15 @@ _PDF_MAGIC_BYTES = b"%PDF-"
 async def extract_brief_from_pdf(
     file: UploadFile = File(...),
     settings: Settings = Depends(get_settings),
+    pdf_port: PdfIngestionPort = Depends(get_pdf_adapter),
 ) -> CompetitionBrief:
     """Upload a PDF, extract a structured ``CompetitionBrief``.
 
-    P2-005 Sprint 0-2 ships the mock PDF adapter — it treats the bytes
-    after the ``%PDF-`` header as plain UTF-8 text. The Docling-backed
-    real adapter lands in Sprint 3 under ``--extra ocr`` and will be
-    selected here via a future ``Settings.pdf_adapter`` switch.
+    The PDF parser engine is resolved through ``Depends(get_pdf_adapter)``
+    (Sprint 3 / deep-review M6). Default is the Sprint 0 ``MockPdfAdapter``
+    (zero deps, decodes bytes as UTF-8 — fine for synthetic briefs).
+    Setting ``PDF_ADAPTER=docling`` switches to layout-aware extraction
+    via Docling (requires ``uv sync --extra ocr``).
 
     Validations:
     - size ≤ 10 MiB (413 Request Entity Too Large otherwise)
@@ -279,7 +292,6 @@ async def extract_brief_from_pdf(
             ),
         )
 
-    pdf_port = MockPdfAdapter()
     extractor = BriefExtractor(settings=settings, pdf_port=pdf_port)
     return extractor.extract_from_pdf(contents)
 

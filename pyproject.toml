@@ -43,6 +43,13 @@ langgraph = [
 otel = [
     "opentelemetry-exporter-otlp>=1.27.0"
 ]
+# P2-005 Sprint 3 — real PDF layout extraction via Docling. Heavy ML
+# deps (easyocr → torch, pypdfium2, huggingface-hub) so the default
+# install stays light; only operators who set PDF_ADAPTER=docling
+# need to run ``uv sync --extra ocr``.
+ocr = [
+    "docling>=2.0.0"
+]
 
 [tool.uv]
 dev-dependencies = [

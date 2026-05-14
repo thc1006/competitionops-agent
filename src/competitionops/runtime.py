@@ -36,9 +36,12 @@ from competitionops.adapters.file_audit import FileAuditLog
 from competitionops.adapters.file_plan_store import FilePlanRepository
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
+from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import get_settings
-from competitionops.ports import AuditLogPort, PlanRepository
+from competitionops.ports import AuditLogPort, PdfIngestionPort, PlanRepository
+
+_KNOWN_PDF_ADAPTERS: tuple[str, ...] = ("mock", "docling")
 
 
 @lru_cache(maxsize=1)
@@ -86,3 +89,48 @@ def _registry() -> AdapterRegistry:
     set every FastAPI request / MCP tool / workflow execute step uses.
     """
     return build_default_registry()
+
+
+@lru_cache(maxsize=1)
+def _pdf_adapter() -> PdfIngestionPort:
+    """PDF ingestion adapter singleton (P2-005 Sprint 3 + deep-review M6).
+
+    Switches on ``Settings.pdf_adapter`` (env ``PDF_ADAPTER``):
+
+    - ``None`` / ``"mock"`` (default): Sprint 0's ``MockPdfAdapter`` —
+      strips ``%PDF-`` header and decodes the rest as UTF-8. Zero deps,
+      fine for synthetic briefs and CI.
+    - ``"docling"``: real layout-aware extraction via
+      ``DoclingPdfAdapter``. Requires ``uv sync --extra ocr`` (Docling
+      pulls in heavy ML / CV deps). Imported lazily inside this
+      factory so the default install never pays the import cost.
+
+    Unknown values raise ``ValueError`` rather than silently falling
+    back to mock — operator typos must surface at startup.
+
+    Wired through ``main.get_pdf_adapter`` (FastAPI ``Depends``) so
+    tests can inject stubs via ``app.dependency_overrides`` without
+    monkey-patching anything (deep-review M6).
+    """
+    raw = get_settings().pdf_adapter or "mock"
+    choice = raw.lower()
+    if choice == "mock":
+        return MockPdfAdapter()
+    if choice == "docling":
+        # Lazy import — Docling pulls in torch / easyocr / pypdfium2.
+        # Only operators who explicitly opted in (PDF_ADAPTER=docling)
+        # pay this cost.
+        try:
+            from competitionops.adapters.pdf_docling import DoclingPdfAdapter
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "PDF_ADAPTER=docling requires the optional ``ocr`` extra. "
+                "Run ``uv sync --extra ocr`` to install Docling, or unset "
+                "PDF_ADAPTER to fall back to the mock adapter."
+            ) from exc
+        return DoclingPdfAdapter()
+    raise ValueError(
+        f"Unknown pdf_adapter / PDF_ADAPTER value: {raw!r} "
+        f"(normalized to {choice!r}). Expected one of "
+        f"{_KNOWN_PDF_ADAPTERS!r} (case-insensitive)."
+    )
