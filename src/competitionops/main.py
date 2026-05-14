@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -23,12 +24,99 @@ from competitionops.schemas import (
 from competitionops.services.brief_extractor import BriefExtractor
 from competitionops.services.execution import ExecutionService, PlanNotFoundError
 from competitionops.services.planner import CompetitionPlanner
-from competitionops.telemetry import setup_tracer_provider
+from competitionops.telemetry import setup_meter_provider, setup_tracer_provider
 
-# Initialise the OTel SDK TracerProvider before app instantiation so the
-# FastAPI auto-instrumentation middleware emits real (not NonRecording)
-# spans. Idempotent — repeated imports under pytest do not re-create.
+
+# ----------------------------------------------------------------------
+# Sprint 6 — opt-in OTLP / console exporter wiring
+# ----------------------------------------------------------------------
+
+
+def _otel_exporters_enabled() -> bool:
+    """True when any production telemetry exporter has been requested."""
+    return (
+        os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") is not None
+        or os.environ.get("COMPETITIONOPS_OTEL_CONSOLE") == "1"
+    )
+
+
+def _wire_otel_exporters() -> None:
+    """Attach span processors + meter readers based on env.
+
+    Two opt-in switches:
+
+    - ``OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector:4317`` —
+      attaches OTLP gRPC exporters for traces + metrics. Requires
+      ``uv sync --extra otel`` so ``opentelemetry-exporter-otlp`` is
+      installed. The exporter package picks up the standard OTel env
+      vars (``OTEL_EXPORTER_OTLP_HEADERS``, ``OTEL_SERVICE_NAME``, etc.)
+      without further configuration.
+
+    - ``COMPETITIONOPS_OTEL_CONSOLE=1`` — attaches console exporters
+      (traces + metrics) for local dev. Only requires the ``sdk`` base
+      dep so no extra install needed.
+
+    Both flags can be set simultaneously; processors stack.
+    """
+    from opentelemetry.sdk.metrics.export import (
+        MetricReader,
+        PeriodicExportingMetricReader,
+    )
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    tracer_provider = setup_tracer_provider()
+    metric_readers: list[MetricReader] = []
+
+    if os.environ.get("COMPETITIONOPS_OTEL_CONSOLE") == "1":
+        from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(ConsoleSpanExporter())
+        )
+        metric_readers.append(
+            PeriodicExportingMetricReader(
+                ConsoleMetricExporter(),
+                export_interval_millis=60000,
+            )
+        )
+
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        # Lazy import: only the production deployment path needs the
+        # gRPC exporter package, which is gated behind the ``otel`` extra.
+        # ``import-not-found`` is silenced because dev venvs (uv sync without
+        # --extra otel) legitimately don't have these stubs installed.
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (  # type: ignore[import-not-found]
+            OTLPMetricExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # type: ignore[import-not-found]
+            OTLPSpanExporter,
+        )
+
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter())
+        )
+        metric_readers.append(
+            PeriodicExportingMetricReader(
+                OTLPMetricExporter(),
+                export_interval_millis=60000,
+            )
+        )
+
+    if metric_readers:
+        setup_meter_provider(readers=metric_readers)
+
+
+# Always install the SDK TracerProvider so the FastAPI auto-instrumentation
+# middleware can emit real (not NonRecording) spans even in dev. Idempotent
+# under pytest reimports. The MeterProvider stays as ProxyMeterProvider
+# unless an exporter is opted in (see _wire_otel_exporters), so test files
+# can still attach their own InMemoryMetricReader during the test session.
 setup_tracer_provider()
+
+if _otel_exporters_enabled():
+    _wire_otel_exporters()
+
 
 app = FastAPI(title="CompetitionOps Agent", version="0.1.0")
 

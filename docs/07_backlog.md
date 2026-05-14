@@ -110,8 +110,13 @@ Counter `competitionops.audit.records.total` per AuditRecord, Histogram
 `competitionops.action.execution.duration_seconds` per adapter dispatch;
 MeterProvider bootstrap via `setup_meter_provider(readers=...)`) ✅.
 
-Next: Sprint 6 — (optional) console-exporter dev mode + OTLP exporter
-wiring under the `otel` extra for production. See
-`docs/10_p2_roadmap.md` for the full sprint sequence.
+Sprint 6 — opt-in OTLP / console exporter wiring driven by env
+(``OTEL_EXPORTER_OTLP_ENDPOINT`` for OTLP gRPC, requires ``uv sync
+--extra otel``; ``COMPETITIONOPS_OTEL_CONSOLE=1`` for console dev mode,
+no extra needed). Default behavior unchanged — exporters stay off unless
+explicitly opted in. ✅
+
+P2-004 main track complete. Remaining: optional polish (Sprint 6+
+metric attribute review, custom resource attributes for service.name).
 
 ### P2-005 — Local OCR / layout parsing with GPU

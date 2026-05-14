@@ -443,3 +443,4 @@ bash scripts/verify.sh
 | 2026-05-14 | P2-004 Sprint 0+2+3+4+5 全綠；Tier 0 #2 SecretStr ✅ | Claude Code |
 | 2026-05-14 | Tier 0 #4 FileAuditLog 落地；AUDIT_LOG_DIR env 切換；13 條新測試 | Claude Code |
 | 2026-05-14 | Tier 0 #1 SSRF allow-list；BriefExtractRequest 擴 url/drive；41 條新測試；P1-006 ready | Claude Code |
+| 2026-05-14 | P2-004 Sprint 6 OTLP exporter wiring；env opt-in；7 條測試 + 1 OTLP skip | Claude Code |
