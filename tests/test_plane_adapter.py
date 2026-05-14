@@ -14,6 +14,7 @@ diff for "GOOGLE_TARGETS" removal).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -561,3 +562,194 @@ async def test_real_create_issue_falls_through_when_search_raises_network() -> N
 
     assert captured_methods == ["GET", "POST"]
     assert issue["id"] == "post-after-network-fail"
+
+
+# ---------------------------------------------------------------------------
+# M7 — search-step hardening
+#
+# Background: ``_search_existing_issue`` previously swallowed ALL 4xx /
+# 5xx responses and degraded to POST. That's the right call for
+# "search disabled on this self-hosted Plane" (5xx, 404, 4xx other than
+# auth) — we'd rather lose idempotency than block the create. It is
+# NOT the right call for auth failures: 401 / 403 from search means
+# the credentials are misconfigured, and falling through to POST will
+# just produce the same 401 / 403 from the POST with a less-specific
+# error message. Failing fast on auth surfaces the actual problem.
+#
+# Separately, the raw title was passed as the ``search`` query param
+# with no length cap. A 10 KiB competition brief title used as an
+# issue name produced a URL longer than typical proxy / origin limits
+# (~8 KiB), yielding 414 URI Too Long from the search step — which
+# under the old fall-through code silently lost idempotency on every
+# retry. The fix truncates the search query to a conservative byte
+# budget while keeping the full title in the POST body and in the
+# exact-match comparison on the search response.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_search_401_raises_and_skips_post() -> None:
+    """M7 — auth failure on search must short-circuit, NOT fall
+    through to POST. Falling through would surface the same 401 from
+    a different verb and waste a round trip."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(401, json={"error": "invalid api key"})
+        return httpx.Response(201, json={"id": "should-not-post", "name": "x"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(_make_action(), dry_run=False)
+
+    assert captured_methods == ["GET"], (
+        f"M7: POST must NOT be sent after a 401 from search; "
+        f"saw {captured_methods!r}"
+    )
+    assert result.status == "failed"
+    assert "401" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_real_search_403_raises_and_skips_post() -> None:
+    """M7 — 403 (authenticated but not authorised for this workspace
+    or project) is also a hard auth failure. Same behaviour as 401."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(403, json={"error": "forbidden"})
+        return httpx.Response(201, json={"id": "should-not-post", "name": "x"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(_make_action(), dry_run=False)
+
+    assert captured_methods == ["GET"]
+    assert result.status == "failed"
+    assert "403" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_real_search_404_still_falls_through_to_post() -> None:
+    """Regression guard: only auth failures (401/403) short-circuit.
+    A 404 from search means "endpoint not implemented" (some
+    self-hosted Plane variants); fall through to POST stays correct."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(404, text="search not implemented")
+        return httpx.Response(
+            201, json={"id": "post-after-404-search", "name": "x"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title="x")
+
+    assert captured_methods == ["GET", "POST"]
+    assert issue["id"] == "post-after-404-search"
+
+
+@pytest.mark.asyncio
+async def test_real_search_414_uri_too_long_still_falls_through() -> None:
+    """If a misconfigured proxy still rejects a (post-truncation)
+    search URL with 414, the create should still succeed. Same
+    contract as 5xx — search is best-effort idempotency."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(414, text="URI Too Long")
+        return httpx.Response(
+            201, json={"id": "post-after-414-search", "name": "x"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title="x")
+
+    assert captured_methods == ["GET", "POST"]
+    assert issue["id"] == "post-after-414-search"
+
+
+@pytest.mark.asyncio
+async def test_real_search_query_param_truncated_for_long_titles() -> None:
+    """M7 — a title longer than the search-query cap is truncated for
+    the GET ``search=`` param but the FULL title still lands in the
+    POST body. The truncation cap keeps the search URL well under
+    typical 8 KiB URL limits even after URL-encoding."""
+    captured_get_query: dict[str, str] = {}
+    captured_post_body: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            captured_get_query["raw"] = str(request.url)
+            captured_get_query["search"] = request.url.params.get("search", "")
+            return httpx.Response(200, json=[])  # no match → fall through to POST
+        body = json.loads(request.content.decode("utf-8"))
+        captured_post_body["name"] = body["name"]
+        return httpx.Response(201, json={"id": "long-title-issue", "name": body["name"]})
+
+    long_title = "RunSpace Innovation Challenge " * 500  # ~15 KiB raw
+    assert len(long_title) > 10_000
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title=long_title)
+
+    # Search param is bounded (well under typical 8 KiB URL limit).
+    assert len(captured_get_query["search"]) <= 1024, (
+        f"M7 search query was {len(captured_get_query['search'])} chars; "
+        "must be capped to keep the URL under proxy / origin limits"
+    )
+    # The full URL (after URL-encoding) also stays well under 8 KiB.
+    assert len(captured_get_query["raw"]) < 8 * 1024
+    # Crucially, the POST body still carries the FULL title — the
+    # truncation is for search idempotency only, not for the stored
+    # issue name.
+    assert captured_post_body["name"] == long_title
+    assert issue["id"] == "long-title-issue"
+
+
+@pytest.mark.asyncio
+async def test_real_create_issue_truncated_search_still_dedupes_exact_match() -> None:
+    """The exact-match filter on the search response uses the FULL
+    title, not the truncated search query. So if Plane returns a hit
+    that has the same long title, idempotency holds. (If Plane returns
+    a different title that happens to share the first N chars, the
+    exact-match comparison correctly rejects it and we POST.)"""
+    long_title = "X" * 2000  # bigger than the truncation cap
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            # Plane returns a hit whose name matches the FULL long title.
+            return httpx.Response(
+                200,
+                json=[{"id": "already-exists", "name": long_title}],
+            )
+        # If POST fires, the test failed.
+        return httpx.Response(500, text="POST should not have fired on exact match")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title=long_title)
+
+    assert captured_methods == ["GET"], (
+        "exact-match on full title must short-circuit before POST"
+    )
+    assert issue["id"] == "already-exists"

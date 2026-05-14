@@ -99,7 +99,14 @@ real mode now honors ``dry_run=True`` by short-circuiting BEFORE any
 HTTP call and returning a synthetic ``dry_run_<sha1(title)[:8]>``
 preview. Previously a preview against a fully-configured Plane would
 silently create a real issue (Settings.dry_run_default=True is the
-hot path).**
+hot path).** **M7 (2026-05-14) closed — ``_search_existing_issue`` now
+(a) caps the ``search`` query parameter at 512 chars so a 10 KiB title
+cannot push the GET URL past typical proxy / origin limits and silently
+lose idempotency via 414, and (b) raises immediately on 401 / 403
+instead of degrading to POST, so auth misconfiguration surfaces at the
+real failure point. Non-auth 4xx / 5xx / network / malformed JSON all
+keep degrading to POST (self-hosted Plane with search disabled still
+creates issues).**
 
 ### P1-005 — Drive folder creation / move files
 
