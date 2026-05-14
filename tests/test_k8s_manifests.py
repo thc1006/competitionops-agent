@@ -241,29 +241,34 @@ def test_overlay_staging_uses_base_pvc_unchanged() -> None:
     assert "patches" not in kustomization or not kustomization.get("patches")
 
 
-def test_overlay_prod_pinned_to_one_replica_until_shared_plan_repo_lands() -> None:
+def test_overlay_prod_pinned_to_one_replica_as_deployment_policy_default() -> None:
     """H2 regression guard.
 
-    Prod overlay is pinned to ``replicas: 1``. As of the shared-plan-repo
-    PR, ``FilePlanRepository`` (file-backed, atomic-rename save, opted
-    in via ``PLAN_REPO_DIR``) ships in-tree and closes half the H2
-    dependency. The OTHER half is H3 — multi-writer safety for the
-    ``FileAuditLog`` JSONL appends, which is still dormant while
-    replicas=1. The pin therefore stays at 1 until BOTH:
+    Prod overlay is pinned to ``replicas: 1`` as a deployment-policy
+    default. Both halves of the underlying dependency are now closed
+    in-tree:
 
-    1. The operator has wired ``PLAN_REPO_DIR`` onto a shared volume.
-    2. H3 is closed (``fcntl.flock`` around appends, or per-pod
-       filenames).
+    1. ``FilePlanRepository`` ships in
+       ``adapters/file_plan_store.py``. Opt in via ``PLAN_REPO_DIR``.
+    2. H3 closed by per-writer filenames in
+       ``adapters/file_audit.py`` — each pod writes to
+       ``<plan_id>.<writer_id>.jsonl`` where ``writer_id`` defaults to
+       the pod's hostname / ``metadata.name``. No shared resource ⇒
+       no torn-write risk regardless of RWX filesystem.
+
+    Lifting the pin is now a one-line manifest change once the
+    operator has set ``PLAN_REPO_DIR`` on a shared volume and confirmed
+    their build contains the H3 fix. See ``infra/k8s/README.md`` for
+    the full checklist.
 
     The ``podAntiAffinity`` block stays in the patch so the spread
-    intent survives this temporary 1-replica window; it's a no-op now
-    but lights up immediately when replicas is bumped.
+    intent activates the moment replicas climbs.
     """
     patch = _load_yaml(_OVERLAYS / "prod" / "deployment-patch.yaml")
     assert patch["spec"]["replicas"] == 1, (
-        "Prod must stay at replicas=1 until BOTH PLAN_REPO_DIR is "
-        "wired on a shared volume AND H3 (audit-log multi-writer "
-        "safety) is closed. See H2 comment in this test for context."
+        "Prod overlay default stays at replicas=1. Lifting the pin is "
+        "an operator action (set PLAN_REPO_DIR + bump this number). "
+        "See H2 comment in this test + infra/k8s/README.md for context."
     )
     affinity = patch["spec"]["template"]["spec"]["affinity"]
     assert "podAntiAffinity" in affinity

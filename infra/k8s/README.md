@@ -81,24 +81,36 @@ pod returns 404. The prod overlay is therefore pinned to ``replicas: 1``.
   flips both the FastAPI and the MCP processes onto the file-backed
   adapter.
 
-### What still gates the pin
+### What still shipped — H3 closed
 
-H3 — multi-writer safety for the ``FileAuditLog`` JSONL appends. While
-replicas=1, only one pod writes the audit log, so the append-after-append
-race is dormant. The moment replicas climbs without an H3 fix
-(``fcntl.flock`` around the append, or per-pod filenames), concurrent
-``approve_and_execute`` calls torn-write the JSONL and ``list_for_plan``
-starts failing to parse some records.
+H3 — multi-writer safety for ``FileAuditLog`` — is now closed in-tree
+by per-writer filenames rather than ``fcntl.flock``. Layout::
+
+    <base_dir>/
+      ├── <plan_id>.<pod_hostname_a>.jsonl   # written by pod a only
+      ├── <plan_id>.<pod_hostname_b>.jsonl   # written by pod b only
+      └── ...
+
+``writer_id`` defaults to ``socket.gethostname()`` which in a k8s pod
+is the pod's ``metadata.name`` — no extra wiring required. Each pod
+owns its own file, so there is no shared resource between writers
+and torn writes are impossible regardless of the underlying
+filesystem (NFS, CephFS, Azure Files, EFS, …). ``list_for_plan``
+globs ``<plan_id>.*.jsonl`` and merges across writers; legacy
+``<plan_id>.jsonl`` files from pre-H3 deployments are also picked up
+so in-place upgrades keep the historical audit trail.
 
 ### Operator checklist to lift the pin
 
-1. Mount a shared volume at a path of your choice (the existing
-   ``competitionops-audit`` PVC works; just pick a different subdir or a
+1. Mount a shared RWX volume at a path of your choice (the existing
+   ``competitionops-audit`` PVC works; pick a different subdir or a
    separate PVC for plans).
 2. Set ``PLAN_REPO_DIR=/path/on/that/volume`` via configmap or secret.
-3. Confirm H3 is closed in your build (until then, keep replicas=1).
+3. Confirm your build is on top of the H3 fix
+   (``adapters/file_audit.py`` writes ``<plan_id>.<writer_id>.jsonl``).
 4. Edit ``overlays/prod/deployment-patch.yaml`` to bump replicas. The
-   ``podAntiAffinity`` block is already in place to spread pods.
+   ``podAntiAffinity`` block is already in place to spread pods
+   across nodes.
 
 ## Secrets
 
