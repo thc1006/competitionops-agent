@@ -225,27 +225,44 @@ async def test_audit_event_generated_for_every_executed_adapter_call() -> None:
 
 
 def test_no_real_google_or_network_imports_in_adapter_modules() -> None:
-    forbidden = [
+    """Stage 4 + P1-005 guard.
+
+    All four Google adapters must avoid the real Google SDK (we keep our
+    own httpx-based adapters so domain code never imports googleapiclient).
+    Generic network libraries are tolerated **only** for ``drive_mod``,
+    which has graduated to a mock-first + real-mode adapter (P1-005).
+    Docs / Sheets / Calendar remain pure mocks; they still ban httpx /
+    requests / urllib until P1-001~003 lift them too.
+    """
+    sdk_forbidden = [
         "googleapiclient",
         "google.oauth2",
         "google.auth",
         "google_auth_oauthlib",
-        "requests",
-        "httpx",
-        "urllib.request",
-        "http.client",
-        "socket.socket",
         "open('.env",
         'open(".env',
         "credentials.json",
         "client_secret.json",
     ]
-    for module in (drive_mod, docs_mod, sheets_mod, calendar_mod):
+    network_forbidden = [
+        "requests",
+        "urllib.request",
+        "http.client",
+        "socket.socket",
+    ]
+    # drive_mod is exempt from the network ban (real mode); the rest aren't.
+    for module in (docs_mod, sheets_mod, calendar_mod):
         source = inspect.getsource(module)
-        for needle in forbidden:
+        for needle in sdk_forbidden + network_forbidden + ["httpx"]:
             assert needle not in source, (
-                f"{module.__name__} must not reference {needle!r} in Stage 4 (mock-first)"
+                f"{module.__name__} must not reference {needle!r} (mock-first)"
             )
+    drive_source = inspect.getsource(drive_mod)
+    for needle in sdk_forbidden + network_forbidden:
+        assert needle not in drive_source, (
+            f"{drive_mod.__name__} must not reference {needle!r} "
+            "(real mode is httpx-only, no Google SDK or low-level sockets)"
+        )
 
 
 @pytest.mark.asyncio
