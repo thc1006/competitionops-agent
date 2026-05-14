@@ -26,9 +26,22 @@ Idempotency (Tier 0 #5):
   its ``name`` matches exactly. Only the no-match case falls through to
   POST. So a repeat approval with ``allow_reexecute=true`` no longer
   duplicates the Plane issue — it surfaces the original id.
-- The search step degrades gracefully: if Plane responds 4xx/5xx on the
-  GET (e.g. search disabled on some self-hosted instances) we fall
-  through to POST rather than blocking the entire flow.
+- The search step degrades gracefully: if Plane responds with a
+  non-auth 4xx / 5xx on the GET (e.g. search disabled on some
+  self-hosted instances) we fall through to POST rather than blocking
+  the entire flow.
+
+Search-step hardening (M7):
+- The ``search`` query parameter is capped at
+  ``_SEARCH_QUERY_MAX_CHARS`` (512) so a pathologically long title
+  cannot push the GET URL past typical proxy / origin limits (~8 KiB
+  after URL-encoding). The full title still lands in the POST body
+  and in the exact-match comparison on the search response, so
+  idempotency holds for legitimate cases.
+- Auth failures during search (401 / 403) propagate immediately as
+  ``httpx.HTTPStatusError`` — falling through to POST would just
+  produce the same 401 / 403 from a less specific code path. The
+  audit record surfaces the real failure point.
 
 Out of scope for this commit:
 - 429 / 5xx retry + exponential backoff on the POST itself.
@@ -59,6 +72,19 @@ from competitionops.schemas import ExternalAction, ExternalActionResult
 
 _PLANE_API_PATH = "/api/v1/workspaces/{slug}/projects/{project_id}/issues/"
 _HTTP_TIMEOUT_SECONDS = 30.0
+# M7 — Cap the ``search`` query parameter to keep the GET URL well under
+# typical proxy / origin limits (~8 KiB) even after URL-encoding picks
+# up multi-byte unicode in competition titles. 512 chars × 4 bytes max
+# UTF-8 × ~3x URL-encoding overhead ≈ 6 KiB, leaves headroom for the
+# rest of the URL (base, path, other query params, headers proxies
+# sometimes count toward the same budget).
+_SEARCH_QUERY_MAX_CHARS = 512
+# M7 — Auth-class failures during search are NOT recoverable by
+# falling through to POST (the POST will hit the same 401/403 with
+# less context). Surface them immediately so audit records the real
+# failure point. Other 4xx / 5xx keep degrading to POST so a self-
+# hosted Plane with search disabled still creates issues.
+_AUTH_FAILURE_STATUSES = frozenset({401, 403})
 
 
 def _hash(text: str, length: int = 8) -> str:
@@ -183,20 +209,41 @@ class PlaneAdapter:
     ) -> dict[str, Any] | None:
         """Return the existing Plane issue with ``name == title`` or None.
 
-        Search-step failures (4xx/5xx, malformed JSON, network) fall through
-        to POST rather than blocking the entire create. Self-hosted Plane
-        instances with search disabled therefore still work — they just lose
-        the idempotency guarantee for that one call.
+        Search behaviour (M7 hardening):
+
+        - The ``search`` query parameter is truncated to
+          ``_SEARCH_QUERY_MAX_CHARS`` so a long title cannot blow up the
+          GET URL past typical proxy / origin limits. The full title is
+          still compared exactly against each returned issue's ``name``,
+          so this only loses idempotency for the pathological case of
+          two long titles sharing the first 512 chars (which we resolve
+          by falling through to POST anyway).
+        - Auth failures (401 / 403) raise immediately instead of
+          degrading to POST. Falling through would just produce the
+          same auth failure from a less specific code path.
+        - Other 4xx / 5xx / malformed JSON / network errors keep
+          degrading to POST — self-hosted Plane instances with search
+          disabled still work, they just lose idempotency for that one
+          call.
         """
+        search_value = (
+            title if len(title) <= _SEARCH_QUERY_MAX_CHARS
+            else title[:_SEARCH_QUERY_MAX_CHARS]
+        )
         try:
             response = await client.get(
                 list_url,
-                params={"search": title},
+                params={"search": search_value},
                 headers=headers,
                 timeout=_HTTP_TIMEOUT_SECONDS,
             )
         except httpx.HTTPError:
             return None
+        if response.status_code in _AUTH_FAILURE_STATUSES:
+            # Propagates as httpx.HTTPStatusError → execute() catches
+            # it in the same branch as a 401/403 on POST and surfaces
+            # a clean ``status="failed"`` with the real status code.
+            response.raise_for_status()
         if response.status_code >= 400:
             return None
         try:
