@@ -94,7 +94,12 @@ closed — every executed audit record now surfaces ``target_external_id``
 including Plane. Tier 0 #5 closed — real mode does GET-by-search before
 POST, returning the existing issue on match (idempotent across repeated
 approvals). Search-step failures degrade to plain POST so self-hosted
-instances with search disabled still work.
+instances with search disabled still work. **C1 (2026-05-14) closed —
+real mode now honors ``dry_run=True`` by short-circuiting BEFORE any
+HTTP call and returning a synthetic ``dry_run_<sha1(title)[:8]>``
+preview. Previously a preview against a fully-configured Plane would
+silently create a real issue (Settings.dry_run_default=True is the
+hot path).**
 
 ### P1-005 — Drive folder creation / move files
 

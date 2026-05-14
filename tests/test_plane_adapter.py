@@ -299,6 +299,114 @@ async def test_real_execute_maps_network_error_to_failed_result() -> None:
     assert "synthetic" in (result.error or "")
 
 
+# ---------------------------------------------------------------------------
+# C1 — dry_run safety in real mode
+#
+# Background: ``Settings.dry_run_default=True`` and the ExecutionService
+# always threads ``dry_run`` into ``adapter.execute``. Before this fix,
+# real mode performed the GET + POST against Plane regardless of the
+# flag, which meant the very first preview against a fully-configured
+# Plane would silently create a real issue. Violates CLAUDE.md absolute
+# rule #3 ("所有 Google / Plane / Calendar 寫入動作都先做 dry-run").
+#
+# Contract after the fix: real mode + dry_run=True ⇒ zero HTTP calls,
+# return a synthetic ``dry_run_<sha1[:8]>`` external_id so the audit
+# trail and preview UI still have something to display. Mock mode is
+# unchanged — it has no side effects so running it through is safe.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_execute_dry_run_makes_no_http_call() -> None:
+    """The defining test for C1: real mode must NOT touch the network
+    when dry_run=True."""
+    seen_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_methods.append(request.method)
+        return httpx.Response(500, text="should not have reached Plane")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(
+            _make_action("Real-mode dry-run target"), dry_run=True
+        )
+
+    assert seen_methods == [], (
+        f"real mode must not touch the network during dry_run; saw {seen_methods!r}"
+    )
+    assert result.status == "dry_run"
+    assert result.target_system == "plane"
+    assert result.external_id is not None
+    assert result.external_id.startswith("dry_run_")
+    # message should make the mode explicit so PMs reading the audit
+    # log can tell preview-vs-executed apart.
+    assert "real" in (result.message or "").lower()
+    assert "dry" in (result.message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_real_execute_dry_run_preview_id_is_deterministic() -> None:
+    """Preview ids are stable across re-runs so the approval UI can
+    show the same identifier the second time the PM looks at it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Defensive: any HTTP call here is a regression of C1.
+        raise AssertionError("dry_run must not issue HTTP requests")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        first = await adapter.execute(_make_action("Stable title"), dry_run=True)
+        second = await adapter.execute(_make_action("Stable title"), dry_run=True)
+        different = await adapter.execute(_make_action("Other title"), dry_run=True)
+
+    assert first.external_id == second.external_id
+    assert first.external_id != different.external_id
+
+
+@pytest.mark.asyncio
+async def test_real_execute_dry_run_false_still_reaches_plane() -> None:
+    """Sanity: dry_run=False keeps the existing real-mode behavior. The
+    C1 guard is targeted — it must not also block legitimate executes."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            201,
+            json={"id": "real-issue-after-fix", "name": "Title that lands"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(
+            _make_action("Title that lands"), dry_run=False
+        )
+
+    assert captured_methods == ["GET", "POST"]
+    assert result.status == "executed"
+    assert result.external_id == "real-issue-after-fix"
+
+
+@pytest.mark.asyncio
+async def test_mock_mode_dry_run_keeps_passing_through_to_mock_create() -> None:
+    """The C1 short-circuit must NOT swallow mock-mode behaviour — mock
+    has no side effects, and the existing tests / audit fixtures rely
+    on dry_run mock executes producing ``mock_issue_<sha1>`` ids."""
+    adapter = PlaneAdapter(settings=_settings_mock())
+    result = await adapter.execute(_make_action("Mock dry"), dry_run=True)
+
+    assert result.status == "dry_run"
+    assert result.external_id is not None
+    assert result.external_id.startswith("mock_issue_")
+    assert not result.external_id.startswith("dry_run_")
+
+
 @pytest.mark.asyncio
 async def test_adapter_source_does_not_reference_real_plane_hosts() -> None:
     """Defense in depth: the adapter source code must never hardcode a
