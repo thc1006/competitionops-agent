@@ -218,6 +218,9 @@ def test_e2e_dry_run_happy_path_from_brief_to_audit_report() -> None:
     assert result["blocked"] == []
 
     # Audit covers every executed action with provenance fields populated.
+    # P1-004 upgraded the Plane adapter so the Stage 8.0 review's previous
+    # GOOGLE_TARGETS exception is gone — every executed record across all
+    # five write target_systems must now surface ``target_external_id``.
     audit = main_module._audit_log().list_for_plan(plan["plan_id"])
     executed_records = [r for r in audit if r.status == "executed"]
     assert {r.action_id for r in executed_records} == set(approved_ids)
@@ -225,6 +228,9 @@ def test_e2e_dry_run_happy_path_from_brief_to_audit_report() -> None:
         assert record.executed_at is not None
         assert record.request_hash is not None
         assert record.actor == "pm@example.com"
+        assert record.target_external_id is not None, (
+            f"adapter {record.target_system!r} must surface external_id"
+        )
 
 
 # ---------------------------------------------------------------------------

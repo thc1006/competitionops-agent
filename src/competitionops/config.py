@@ -38,6 +38,10 @@ class Settings(BaseSettings):
 
     plane_base_url: str | None = None
     plane_api_key: SecretStr | None = None
+    # P1-004 — workspace_slug and project_id are part of the issue-creation
+    # path. Not secrets (visible in user-facing URLs) so they stay plain str.
+    plane_workspace_slug: str | None = None
+    plane_project_id: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

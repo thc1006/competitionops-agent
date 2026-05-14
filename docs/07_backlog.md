@@ -84,6 +84,16 @@ Acceptance:
 
 ### P1-004 — Plane REST adapter
 
+Status: **Done (2026-05-14)** — Plane adapter upgraded from Stage 0 stub
+to mock-first + real-mode httpx-backed REST. Real mode activated when
+all four Settings fields are present (``plane_base_url``,
+``plane_api_key`` (SecretStr), ``plane_workspace_slug``,
+``plane_project_id``); otherwise falls back to deterministic mock. Tests
+use ``httpx.MockTransport`` so the suite stays offline. Tier 0 #3
+closed — every executed audit record now surfaces ``target_external_id``
+including Plane. Tier 0 #5 query-then-create idempotency is the next
+follow-up.
+
 ### P1-005 — Drive folder creation / move files
 
 ### P1-006 — Web ingestion through Playwright / Crawl4AI
