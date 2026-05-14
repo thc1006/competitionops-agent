@@ -4,15 +4,37 @@ A single ``TypedDict`` with ``total=False`` so each node only writes the
 keys it owns. Nested Pydantic objects are stored as ``dict``s
 (``model_dump(mode="json")``) so the graph can be checkpointed to any
 backend that supports JSON serialisation, not just MemorySaver.
+
+Reducer policy (deep-review M3):
+
+The default LangGraph channel for a state field is "last value wins" —
+two parallel writes to the same key per step raise
+``InvalidUpdateError``. That's the right semantics for single-writer
+fields like ``brief`` or ``plan``: any duplicate write is a real bug.
+
+For fields that accumulate results across multiple writers — namely
+the four execution outcome lists (``executed`` / ``skipped`` /
+``failed`` / ``blocked``) and the ``audit_records`` snapshot — we
+explicitly annotate them with ``operator.add`` so LangGraph appends
+parallel writes instead of failing. The current graph is linear so
+only one node writes each list per invocation, but locking the
+reducer contract NOW means a future fan-out (e.g. one execute task
+per action via the ``Send`` API) will just work without revisiting
+this schema.
+
+Single-writer fields stay unannotated on purpose: adding a reducer
+to ``brief``/``plan``/etc would cause duplicates to accumulate on
+graph replay, which is nonsense for those fields.
 """
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 
 
 class CompetitionOpsState(TypedDict, total=False):
-    # ---- caller-supplied inputs ----
+    # ---- caller-supplied inputs (single-writer, default reducer) ----
     raw_brief_text: str
     """Raw competition brief text fed to ``BriefExtractor``."""
 
@@ -25,23 +47,26 @@ class CompetitionOpsState(TypedDict, total=False):
     actor: str
     """``approved_by`` / ``executed_by`` recorded in audit log."""
 
-    # ---- written by ``extract`` node ----
+    # ---- written by ``extract`` node (single-writer) ----
     brief: dict[str, Any] | None
 
-    # ---- written by ``plan`` node ----
+    # ---- written by ``plan`` node (single-writer) ----
     plan: dict[str, Any] | None
 
     # ---- written by caller via ``graph.update_state`` after interrupt ----
     approved_action_ids: list[str]
 
-    # ---- written by ``approve`` node ----
+    # ---- written by ``approve`` node (single-writer) ----
     rejected_action_ids: list[str]
 
-    # ---- written by ``execute`` node ----
-    executed: list[dict[str, Any]]
-    skipped: list[dict[str, Any]]
-    failed: list[dict[str, Any]]
-    blocked: list[dict[str, Any]]
+    # ---- written by ``execute`` node — additive reducer (M3) ----
+    # ``operator.add`` makes parallel writes append instead of clash.
+    # Required for any future Send-based fan-out where each action
+    # dispatches as its own sub-task and produces one element here.
+    executed: Annotated[list[dict[str, Any]], operator.add]
+    skipped: Annotated[list[dict[str, Any]], operator.add]
+    failed: Annotated[list[dict[str, Any]], operator.add]
+    blocked: Annotated[list[dict[str, Any]], operator.add]
 
-    # ---- written by ``audit`` node ----
-    audit_records: list[dict[str, Any]]
+    # ---- written by ``audit`` node — additive reducer (M3) ----
+    audit_records: Annotated[list[dict[str, Any]], operator.add]

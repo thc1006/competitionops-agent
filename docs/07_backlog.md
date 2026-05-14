@@ -157,6 +157,23 @@ across graph reconstruction (same ``thread_id`` survives a "process
 restart"). Production deployments can swap the saver for
 ``SqliteSaver`` / ``PostgresSaver`` without changing the graph shape.
 
+**M3 (2026-05-14) closed** — Accumulative state fields now declare
+``Annotated[list[dict[str, Any]], operator.add]`` so LangGraph appends
+parallel writes instead of raising ``InvalidUpdateError`` (which is
+what default last-value-wins channels do on concurrent updates).
+Locked-in fields: ``executed`` / ``skipped`` / ``failed`` /
+``blocked`` (execute outputs) and ``audit_records``. Single-writer
+fields (``brief`` / ``plan`` / ``rejected_action_ids`` / caller
+inputs) deliberately stay unannotated so graph replay doesn't
+accumulate duplicates. The current graph is linear so behaviour for
+the happy path is identical, but the contract is now safe for a
+future ``Send``-based fan-out (e.g. one execute task per action). 3
+new tests cover: structural Annotated metadata for accumulative
+fields, defence against over-application on single-writer fields,
+and an end-to-end ``Send`` API parallel-writers proof (used to raise
+``InvalidUpdateError`` before this PR; now both writers' records
+survive in the final state).
+
 ### P2-002 — Windmill workflow scripts
 
 Status: **Done (2026-05-14)** — Three Windmill rawscripts under
