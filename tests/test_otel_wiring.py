@@ -85,10 +85,11 @@ def test_otel_exporters_enabled_otlp_endpoint_empty_string_still_truthy(
 def test_wire_otel_exporters_console_mode_runs_without_error(
     monkeypatch: pytest.MonkeyPatch,
     meter_provider_install_captor: dict[str, object],
+    isolated_tracer_provider: object,
 ) -> None:
     """The console branch must complete cleanly when nothing else has
     pre-installed a MeterProvider. Attaches a BatchSpanProcessor +
-    ConsoleSpanExporter to the global TracerProvider and a
+    ConsoleSpanExporter to the (test-scoped) TracerProvider and a
     PeriodicExportingMetricReader + ConsoleMetricExporter to a fresh
     MeterProvider.
 
@@ -99,6 +100,15 @@ def test_wire_otel_exporters_console_mode_runs_without_error(
     conftest fixture isolates this test by reporting a proxy provider
     AND capturing whatever the code-under-test tries to install — so
     we can assert M1's "install actually happened" property too.
+
+    M2 — ``BatchSpanProcessor`` + ``ConsoleSpanExporter`` spawns a
+    worker thread that holds onto stderr; on the global provider that
+    thread survives the test and fires "I/O operation on closed file"
+    after pytest closes its captured fd. ``isolated_tracer_provider``
+    swaps ``get_tracer_provider`` to a per-test SDK provider and
+    shuts it down on teardown — the worker exits before stderr is
+    torn down. Keep this fixture in the signature even if you add
+    asserts that don't reference the provider directly.
     """
     monkeypatch.setenv("COMPETITIONOPS_OTEL_CONSOLE", "1")
     # Should not raise.
@@ -129,12 +139,16 @@ def test_wire_otel_exporters_no_env_runs_but_attaches_nothing(
 def test_wire_otel_exporters_otlp_mode_runs_without_error(
     monkeypatch: pytest.MonkeyPatch,
     meter_provider_install_captor: dict[str, object],
+    isolated_tracer_provider: object,
 ) -> None:
     """Verifies the lazy-import path for OTLP works when the exporter
     package is installed. Skipped automatically on stripped-down clones
     (``uv sync`` without ``--extra otel``). Isolated from session-
-    level MeterProvider state via the conftest captor, same as the
-    console-mode test.
+    level MeterProvider + TracerProvider state via the conftest
+    fixtures (round-3 M1 + M2) — the OTLP gRPC exporter would
+    otherwise hold a background channel against
+    ``otel-collector.example.invalid`` and emit "Transient error
+    StatusCode.UNAVAILABLE" warnings after pytest closes stderr.
     """
     pytest.importorskip(
         "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",

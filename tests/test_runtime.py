@@ -185,3 +185,76 @@ def test_workflow_nodes_can_run_without_importing_main_first() -> None:
 
     result = audit_node({})  # type: ignore[arg-type]
     assert result == {"audit_records": []}
+
+
+# ---------------------------------------------------------------------------
+# Round-3 M1 — eager validation of runtime config at process boot
+# ---------------------------------------------------------------------------
+#
+# Background. ``runtime._pdf_adapter`` already raises ``ValueError`` on an
+# unknown ``PDF_ADAPTER`` value — but only when **called**. In the current
+# wiring nothing calls it at process start, so a typo like ``PDF_ADAPTER=tika``
+# lets the pod pass ``/health`` and only blows up on the first
+# ``/briefs/extract/pdf`` request — sometimes hours into the deployment.
+# The M1 contract: ``main.py`` invokes the validator at module import time
+# so uvicorn aborts before binding the port → CrashLoopBackoff with the
+# bad config name in the log → operator notices immediately.
+
+
+def test_eager_validate_runtime_config_raises_on_unknown_pdf_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_eager_validate_runtime_config()`` must surface unknown
+    ``PDF_ADAPTER`` values as a ``ValueError`` whose message names the
+    offending value. The conftest autouse teardown clears the cached
+    Settings between tests, so this set is local to the function."""
+    from competitionops import main as main_module
+
+    reset_runtime_caches()
+    monkeypatch.setenv("PDF_ADAPTER", "tika")
+
+    with pytest.raises(ValueError, match="tika"):
+        main_module._eager_validate_runtime_config()
+
+
+def test_eager_validate_runtime_config_succeeds_on_default_mock_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``PDF_ADAPTER=`` (unset → ``"mock"``) must not raise.
+    The validator is wired at module import so it would crash every
+    fresh pod if it raised on the default path."""
+    from competitionops import main as main_module
+
+    reset_runtime_caches()
+    monkeypatch.delenv("PDF_ADAPTER", raising=False)
+
+    main_module._eager_validate_runtime_config()  # must not raise
+
+
+def test_main_module_invokes_eager_validate_runtime_config_at_init() -> None:
+    """Structural guard. ``_eager_validate_runtime_config()`` must be
+    called at module top level in ``main.py`` — not behind a function,
+    not on first-request, not inside ``lifespan``. Otherwise the
+    contract degrades back to "fails on first /briefs/extract/pdf"
+    that M1 was filed against.
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path("src/competitionops/main.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+
+    top_level_calls = [
+        node.value.func.id
+        for node in module.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+    ]
+    assert "_eager_validate_runtime_config" in top_level_calls, (
+        "main.py must call _eager_validate_runtime_config() at module "
+        "import time (top-level statement). Putting it behind a "
+        "function or FastAPI lifespan defeats round-3 M1 — invalid "
+        "PDF_ADAPTER values must crash uvicorn import, not the first "
+        "PDF request."
+    )
