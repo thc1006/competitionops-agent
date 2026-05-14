@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     approval_required: bool = True
     dry_run_default: bool = True
 
+    # Tier 0 #4 — when set (e.g., via env AUDIT_LOG_DIR=/var/lib/competitionops/audit)
+    # the audit log factory in main.py / MCP server returns a FileAuditLog
+    # writing to this directory, so audit records survive process restart.
+    # Leaving this None keeps the in-memory adapter (dev / unit-test default).
+    audit_log_dir: str | None = None
+
     anthropic_api_key: SecretStr | None = None
 
     google_oauth_client_id: str | None = None

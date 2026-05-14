@@ -24,10 +24,14 @@ action cannot reach a real adapter.
 from functools import lru_cache
 from typing import Any
 
+from pathlib import Path
+
+from competitionops.adapters.file_audit import FileAuditLog
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import get_settings
+from competitionops.ports import AuditLogPort
 from competitionops.schemas import CompetitionBrief
 from competitionops.services.brief_extractor import BriefExtractor
 from competitionops.services.execution import ExecutionService, PlanNotFoundError
@@ -72,7 +76,16 @@ def _plan_repo() -> InMemoryPlanRepository:
 
 
 @lru_cache(maxsize=1)
-def _audit_log() -> InMemoryAuditLog:
+def _audit_log() -> AuditLogPort:
+    """Audit log singleton — mirrors the FastAPI side.
+
+    Honors ``Settings.audit_log_dir`` (typically env ``AUDIT_LOG_DIR``)
+    to switch between persistent ``FileAuditLog`` and ephemeral
+    ``InMemoryAuditLog`` (Tier 0 #4).
+    """
+    audit_dir = get_settings().audit_log_dir
+    if audit_dir:
+        return FileAuditLog(base_dir=Path(audit_dir))
     return InMemoryAuditLog()
 
 

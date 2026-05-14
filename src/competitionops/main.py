@@ -1,12 +1,15 @@
 from functools import lru_cache
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
+from competitionops.adapters.file_audit import FileAuditLog
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import Settings, get_settings
+from competitionops.ports import AuditLogPort
 from competitionops.schemas import (
     ActionPlan,
     ApprovalDecision,
@@ -41,7 +44,17 @@ def _plan_repo() -> InMemoryPlanRepository:
 
 
 @lru_cache(maxsize=1)
-def _audit_log() -> InMemoryAuditLog:
+def _audit_log() -> AuditLogPort:
+    """Audit log singleton.
+
+    When ``Settings.audit_log_dir`` is set (typically via ``AUDIT_LOG_DIR``
+    env), records persist into per-plan JSONL files there (Tier 0 #4).
+    Otherwise the in-memory adapter is used — fine for dev / unit tests
+    but it loses records on process restart.
+    """
+    audit_dir = get_settings().audit_log_dir
+    if audit_dir:
+        return FileAuditLog(base_dir=Path(audit_dir))
     return InMemoryAuditLog()
 
 
@@ -54,7 +67,7 @@ def get_plan_repo() -> InMemoryPlanRepository:
     return _plan_repo()
 
 
-def get_audit_log() -> InMemoryAuditLog:
+def get_audit_log() -> AuditLogPort:
     return _audit_log()
 
 
@@ -65,7 +78,7 @@ def get_registry() -> AdapterRegistry:
 def get_execution_service(
     plan_repo: InMemoryPlanRepository = Depends(get_plan_repo),
     registry: AdapterRegistry = Depends(get_registry),
-    audit: InMemoryAuditLog = Depends(get_audit_log),
+    audit: AuditLogPort = Depends(get_audit_log),
     settings: Settings = Depends(get_settings),
 ) -> ExecutionService:
     return ExecutionService(
