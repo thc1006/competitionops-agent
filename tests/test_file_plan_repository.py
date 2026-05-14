@@ -251,10 +251,17 @@ def test_file_plan_repository_satisfies_plan_repository_port(
 
 # ---------------------------------------------------------------------------
 # Round-2 L4 — N=100 scale smoke. ``list_all`` opens + parses every
-# JSON in ``base_dir`` per call. Establish a baseline that 100 plans
-# round-trip cleanly so a future change degrading the I/O pattern
-# (e.g. a regression that introduces O(N^2) scan) surfaces here
-# rather than waiting for a prod slowdown.
+# JSON in ``base_dir`` per call. Establishes a baseline that 100
+# plans round-trip cleanly so a future *correctness* regression
+# (drops files, mis-parses ids) surfaces in CI.
+#
+# Caveat — this is NOT a performance assertion. 100 file opens take
+# milliseconds even on degraded I/O paths; a future O(N²) bug would
+# still finish ~fast at N=100. Time-bound assertions are flaky in CI
+# so we deliberately don't add one. If the I/O pattern becomes a
+# real prod concern, the right fix is to add a streaming
+# ``list_all(limit=N)`` overload to the Port, not to make the
+# baseline test flaky.
 # ---------------------------------------------------------------------------
 
 

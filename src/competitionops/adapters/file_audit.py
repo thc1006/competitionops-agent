@@ -110,7 +110,8 @@ class FileAuditLog:
         safe_plan = self._sanitise(plan_id)
         return self.base_dir / f"{safe_plan}.{self.writer_id}.jsonl"
 
-    # Round-2 L3 — shared with FilePlanRepository via _path_utils.
-    # Method-style attribute keeps backward compat with any test that
-    # patches ``FileAuditLog._sanitise`` directly.
+    # See ``_path_utils.sanitise_filename_segment`` for the canonical
+    # helper (round-2 L3). ``staticmethod`` alias keeps back-compat
+    # for ``FileAuditLog._sanitise(...)`` call sites + monkeypatch
+    # in tests.
     _sanitise = staticmethod(sanitise_filename_segment)

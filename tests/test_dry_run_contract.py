@@ -12,14 +12,23 @@ on their real-mode adapter. Same contract:
 - ``message`` ends with ``(<mode>, dry_run).``.
 
 This file enumerates every adapter that should follow the contract
-and asserts the behaviour. Future P1-001 / P1-002 / P1-003 real
-adapters (Docs / Sheets / Calendar) should be added to the parameter
-list when they ship. The test fails loudly if a real adapter forgets
-the dry-run gate or drifts from the format — exactly the C1 leak
-shape.
+and asserts the behaviour. The test fails loudly if a real adapter
+forgets the dry-run gate or drifts from the format — exactly the C1
+leak shape.
 
 Round-2 I2's framing was "extract the pattern into adapters/__init__.py
 docstring or a contract test." This file is the contract test.
+
+TODO — extend the parametrize block below when these real adapters
+land. Each must be added as ``(build_adapter, payload, action_type,
+target_system)`` so the dry-run gate is enforced before merge:
+
+- ``P1-001`` ``GoogleDocsAdapter`` (action_type ``google.docs.create_doc``)
+- ``P1-002`` ``GoogleSheetsAdapter`` (action_type ``google.sheets.append_rows``)
+- ``P1-003`` ``GoogleCalendarAdapter`` (action_type ``google.calendar.create_event``)
+
+Each adapter's own ``_dry_run_preview`` docstring cross-references
+back to this file so the dependency is bidirectional.
 """
 
 from __future__ import annotations
@@ -52,12 +61,23 @@ def _drive_real_settings() -> Settings:
     )
 
 
-def _no_op_handler(request: httpx.Request) -> httpx.Response:
-    """Used inside the MockTransport to assert no HTTP fires."""
-    raise AssertionError(
-        f"HTTP {request.method} {request.url} fired during a dry_run "
-        "execute — contract violation."
-    )
+class _NoHTTPGuard:
+    """MockTransport handler that BOTH raises on call AND tracks the
+    call count. Belt-and-braces: a future real adapter that wraps
+    ``_dry_run_preview`` in ``try/except Exception:`` would swallow the
+    raised AssertionError and pass the rest of the contract via
+    result-shape alone. The counter exposes the real fire count so the
+    test can assert it explicitly after the execute returns."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.call_count += 1
+        raise AssertionError(
+            f"HTTP {request.method} {request.url} fired during a "
+            "dry_run execute — contract violation."
+        )
 
 
 @pytest.mark.asyncio
@@ -96,7 +116,8 @@ async def test_real_adapter_dry_run_preview_contract(
     message. A future Docs / Sheets / Calendar real adapter that
     forgets any of them surfaces here, not at production-time.
     """
-    transport = httpx.MockTransport(_no_op_handler)
+    guard = _NoHTTPGuard()
+    transport = httpx.MockTransport(guard)
     async with httpx.AsyncClient(transport=transport) as client:
         adapter = build_adapter(client)
         action = ExternalAction(
@@ -109,7 +130,14 @@ async def test_real_adapter_dry_run_preview_contract(
         )
         result = await adapter.execute(action, dry_run=True)
 
-    # 1. No HTTP fired — the no_op_handler asserts this.
+    # 1. No HTTP fired. The guard's raise gets the call instantly,
+    # but we ALSO assert the counter for defense against a future
+    # ``try/except Exception`` swallow inside the adapter.
+    assert guard.call_count == 0, (
+        f"{target_system}: dry_run path made {guard.call_count} HTTP "
+        "call(s) — the guard exception may have been swallowed. "
+        "Real adapters must short-circuit BEFORE any HTTP."
+    )
     # 2. Status is "dry_run".
     assert result.status == "dry_run", (
         f"{target_system}: dry_run=True must produce status=dry_run, "
@@ -146,7 +174,8 @@ async def test_dry_run_preview_id_stable_across_repeated_calls() -> None:
     input — the same input should produce the same id every time so
     approval-UI re-renders show a stable preview identifier."""
 
-    transport = httpx.MockTransport(_no_op_handler)
+    guard = _NoHTTPGuard()
+    transport = httpx.MockTransport(guard)
     async with httpx.AsyncClient(transport=transport) as client:
         plane = PlaneAdapter(settings=_plane_real_settings(), client=client)
         plane_a = await plane.execute(
@@ -204,3 +233,5 @@ async def test_dry_run_preview_id_stable_across_repeated_calls() -> None:
     # inputs (title vs folder_name + parent_id), so cross-adapter
     # collisions on identical strings are coincidence, not contract.
     assert plane_a.external_id != drive_a.external_id
+    # Final defence: zero HTTP across all 4 dry_run executes above.
+    assert guard.call_count == 0
