@@ -13,29 +13,15 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from competitionops import config as config_module
 from competitionops import main as main_module
 from competitionops.adapters.file_audit import FileAuditLog
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 
-
-def _reset_all_caches() -> None:
-    config_module.get_settings.cache_clear()
-    main_module._plan_repo.cache_clear()
-    main_module._audit_log.cache_clear()
-    main_module._registry.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolate_settings_cache_per_test():
-    """Stop AUDIT_LOG_DIR leaking into later test files via the
-    ``get_settings()`` lru_cache singleton. Monkeypatch restores env at
-    teardown but does not invalidate the cached Settings instance, so we
-    clear every cache at the END of each test here (the post-yield
-    branch runs before monkeypatch restores env).
-    """
-    yield
-    _reset_all_caches()
+# Round-2 M6 — per-test teardown lives in ``tests/conftest.py`` as an
+# autouse fixture covering all five runtime singletons (including the
+# new ``_pdf_adapter``). Tests that need a mid-body reset import the
+# helper from the conftest module.
+from conftest import reset_runtime_caches as _reset_all_caches  # noqa: E402, I001
 
 
 @pytest.fixture
