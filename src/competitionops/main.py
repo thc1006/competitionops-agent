@@ -1,16 +1,10 @@
 import os
-from functools import lru_cache
-from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from competitionops.adapters.file_audit import FileAuditLog
-from competitionops.adapters.file_plan_store import FilePlanRepository
-from competitionops.adapters.memory_audit import InMemoryAuditLog
-from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.pdf_mock import MockPdfAdapter
-from competitionops.adapters.registry import AdapterRegistry, build_default_registry
+from competitionops.adapters.registry import AdapterRegistry
 from competitionops.config import Settings, get_settings
 from competitionops.ports import AuditLogPort, PlanRepository
 from competitionops.schemas import (
@@ -129,46 +123,13 @@ app = FastAPI(title="CompetitionOps Agent", version="0.1.0")
 FastAPIInstrumentor.instrument_app(app)
 
 
-@lru_cache(maxsize=1)
-def _plan_repo() -> PlanRepository:
-    """Plan repository singleton.
-
-    H2 — When ``Settings.plan_repo_dir`` is set (typically via
-    ``PLAN_REPO_DIR=/var/lib/competitionops/plans``), plans persist to
-    one ``<plan_id>.json`` file per plan under that directory.
-    Otherwise the process-bound in-memory adapter is used (dev / unit
-    tests). Mirrors the ``_audit_log`` switch from Tier 0 #4.
-
-    Setting this env var alone does NOT make multi-replica prod safe —
-    the audit log still uses an unsynchronised append (H3 dormant).
-    The prod ``replicas: 1`` pin in
-    ``infra/k8s/overlays/prod/deployment-patch.yaml`` should only be
-    lifted after the H3 multi-writer fix lands.
-    """
-    plan_dir = get_settings().plan_repo_dir
-    if plan_dir:
-        return FilePlanRepository(base_dir=Path(plan_dir))
-    return InMemoryPlanRepository()
-
-
-@lru_cache(maxsize=1)
-def _audit_log() -> AuditLogPort:
-    """Audit log singleton.
-
-    When ``Settings.audit_log_dir`` is set (typically via ``AUDIT_LOG_DIR``
-    env), records persist into per-plan JSONL files there (Tier 0 #4).
-    Otherwise the in-memory adapter is used — fine for dev / unit tests
-    but it loses records on process restart.
-    """
-    audit_dir = get_settings().audit_log_dir
-    if audit_dir:
-        return FileAuditLog(base_dir=Path(audit_dir))
-    return InMemoryAuditLog()
-
-
-@lru_cache(maxsize=1)
-def _registry() -> AdapterRegistry:
-    return build_default_registry()
+# M4 — singletons live in ``competitionops.runtime`` so the workflow
+# package (and any future worker process) can reach them without
+# importing FastAPI. ``main._plan_repo is runtime._plan_repo`` — same
+# function object, same lru_cache, so existing test fixtures that do
+# ``main_module._plan_repo.cache_clear()`` keep targeting the canonical
+# cache and don't accidentally clear a parallel singleton.
+from competitionops.runtime import _audit_log, _plan_repo, _registry  # noqa: E402
 
 
 def get_plan_repo() -> PlanRepository:

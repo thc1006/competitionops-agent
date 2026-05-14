@@ -5,11 +5,18 @@ Each node is a pure function ``(state) -> partial_state_update``:
 - Returns a partial dict that LangGraph merges into the next state.
 - Does not directly mutate ``state``.
 
-The execute / audit nodes reach into ``competitionops.main`` to reuse
-the same ``_plan_repo / _audit_log / _registry`` singletons that the
-FastAPI surface uses. This means a workflow-driven run lands its audit
-records into the same store as an HTTP-driven run — the persistence
-configuration (``AUDIT_LOG_DIR``) applies uniformly.
+The execute / audit nodes pull the shared
+``_plan_repo / _audit_log / _registry`` singletons from
+``competitionops.runtime`` (deep-review M4) rather than from
+``competitionops.main``. That decouples the workflow package from the
+FastAPI app — a separate worker process (Windmill, Celery, a dedicated
+k8s Deployment) can load ``competitionops.runtime`` plus this module
+and run the graph without pulling in HTTP machinery.
+
+A workflow-driven run still lands its plans / audit records into the
+SAME store as an HTTP-driven run — both processes import the same
+runtime singletons, so the persistence configuration (``PLAN_REPO_DIR``
+/ ``AUDIT_LOG_DIR``) applies uniformly.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from competitionops.config import get_settings
+from competitionops.runtime import _audit_log, _plan_repo, _registry
 from competitionops.schemas import (
     ActionPlan,
     CompetitionBrief,
@@ -80,10 +88,6 @@ def approve_node(state: CompetitionOpsState) -> dict[str, Any]:
 
 async def execute_node(state: CompetitionOpsState) -> dict[str, Any]:
     """Run ``ExecutionService.approve_and_execute`` over the approved ids."""
-    # Imported locally to avoid a top-level circular import — ``main``
-    # depends on this package via the upcoming HTTP workflow endpoints.
-    from competitionops import main as main_module
-
     plan_dict = state.get("plan")
     if not plan_dict:
         return {
@@ -94,13 +98,13 @@ async def execute_node(state: CompetitionOpsState) -> dict[str, Any]:
         }
     plan = ActionPlan.model_validate(plan_dict)
 
-    plan_repo = main_module._plan_repo()
+    plan_repo = _plan_repo()
     plan_repo.save(plan)
 
     service = ExecutionService(
         plan_repo=plan_repo,
-        registry=main_module._registry(),
-        audit_log=main_module._audit_log(),
+        registry=_registry(),
+        audit_log=_audit_log(),
         settings=get_settings(),
     )
 
@@ -122,11 +126,9 @@ async def execute_node(state: CompetitionOpsState) -> dict[str, Any]:
 
 def audit_node(state: CompetitionOpsState) -> dict[str, Any]:
     """Snapshot all audit records for the plan into the final state."""
-    from competitionops import main as main_module
-
     plan_dict = state.get("plan")
     if not plan_dict:
         return {"audit_records": []}
     plan_id = plan_dict.get("plan_id", "")
-    records = main_module._audit_log().list_for_plan(plan_id)
+    records = _audit_log().list_for_plan(plan_id)
     return {"audit_records": [r.model_dump(mode="json") for r in records]}

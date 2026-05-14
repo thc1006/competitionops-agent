@@ -21,18 +21,15 @@ ExecutionService FORBIDDEN_ACTION_TYPES so that even a manually injected
 action cannot reach a real adapter.
 """
 
-from functools import lru_cache
 from typing import Any
 
-from pathlib import Path
 
-from competitionops.adapters.file_audit import FileAuditLog
-from competitionops.adapters.file_plan_store import FilePlanRepository
-from competitionops.adapters.memory_audit import InMemoryAuditLog
-from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
-from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import get_settings
-from competitionops.ports import AuditLogPort, PlanRepository
+# M4 — singletons live in ``competitionops.runtime`` so both the MCP
+# server and the FastAPI app reference the SAME function objects.
+# Test fixtures that ``cache_clear()`` against either module hit the
+# canonical cache.
+from competitionops.runtime import _audit_log, _plan_repo, _registry
 from competitionops.schemas import CompetitionBrief
 from competitionops.services.brief_extractor import BriefExtractor
 from competitionops.services.execution import ExecutionService, PlanNotFoundError
@@ -64,44 +61,6 @@ _GOOGLE_TARGETS: tuple[str, ...] = (
     "google_sheets",
     "google_calendar",
 )
-
-
-# ----------------------------------------------------------------------
-# Dependency singletons (cleared by tests with cache_clear())
-# ----------------------------------------------------------------------
-
-
-@lru_cache(maxsize=1)
-def _plan_repo() -> PlanRepository:
-    """Plan repository singleton — mirrors the FastAPI side.
-
-    Honors ``Settings.plan_repo_dir`` (typically env ``PLAN_REPO_DIR``)
-    to switch between persistent ``FilePlanRepository`` and ephemeral
-    ``InMemoryPlanRepository`` (H2 follow-up).
-    """
-    plan_dir = get_settings().plan_repo_dir
-    if plan_dir:
-        return FilePlanRepository(base_dir=Path(plan_dir))
-    return InMemoryPlanRepository()
-
-
-@lru_cache(maxsize=1)
-def _audit_log() -> AuditLogPort:
-    """Audit log singleton — mirrors the FastAPI side.
-
-    Honors ``Settings.audit_log_dir`` (typically env ``AUDIT_LOG_DIR``)
-    to switch between persistent ``FileAuditLog`` and ephemeral
-    ``InMemoryAuditLog`` (Tier 0 #4).
-    """
-    audit_dir = get_settings().audit_log_dir
-    if audit_dir:
-        return FileAuditLog(base_dir=Path(audit_dir))
-    return InMemoryAuditLog()
-
-
-@lru_cache(maxsize=1)
-def _registry() -> AdapterRegistry:
-    return build_default_registry()
 
 
 def _execution_service() -> ExecutionService:
