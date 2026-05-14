@@ -119,7 +119,35 @@ Round-2 audit confirmed this is the only remaining gate.
    ``competitionops-audit/`` should contain
    ``<plan_id>.<pod-name>.jsonl`` files (one per pod). If you still
    see ``<plan_id>.jsonl`` only, your image is pre-H3 — rebuild.
-4. **Bump replicas in** ``overlays/prod/deployment-patch.yaml``. The
+4. **Migrate the workflow checkpointer off ``MemorySaver``.** The
+   LangGraph workflow in ``src/competitionops/workflows/graph.py``
+   currently defaults to an in-process ``MemorySaver`` checkpointer.
+   That's correct for single-replica but becomes a hidden multi-pod
+   bug once ``replicas>1``: a plan whose ``plan_node`` ran on pod A
+   has its checkpoint in pod A's memory. ``POST /executions/{plan_id}/run``
+   after approval routes by L7 hash to **any** pod, and pod B has no
+   ``thread_id`` for that plan — the workflow either crashes on
+   resume or silently restarts from scratch.
+
+   This step is a **code change**, not a deploy-time toggle —
+   merge it into a release before bumping replicas. Pick one
+   migration target:
+
+   - ``langgraph.checkpoint.sqlite.SqliteSaver`` (PyPI:
+     ``langgraph-checkpoint-sqlite``) against a shared sqlite file on
+     the audit PVC (RWX). Single file, simple, good for low-throughput.
+   - ``langgraph.checkpoint.postgres.PostgresSaver`` (PyPI:
+     ``langgraph-checkpoint-postgres``) against the same PostgreSQL
+     Sprint 7 will provision for plan persistence. Better concurrency,
+     requires a schema migration. Neither saver ships in
+     ``pyproject.toml`` today — add the chosen one as an optional
+     extra (mirroring ``[ocr]``) in the same PR that does the wiring.
+
+   Wire the chosen saver into ``build_graph(checkpointer=...)`` and,
+   when implemented, surface the choice via a Settings field /
+   env var (e.g. ``LANGGRAPH_CHECKPOINTER=sqlite``; this field
+   does not exist yet — Sprint 7 work).
+5. **Bump replicas in** ``overlays/prod/deployment-patch.yaml``. The
    ``podAntiAffinity`` block is already in place to spread pods
    across nodes; un-pin ``replicas: 1`` once the above is done.
 
@@ -133,9 +161,19 @@ transitive deps (``torch``, ``easyocr``, ``pypdfium2``,
 
 ```
 docker build --build-arg INCLUDE_OCR=1 \
-    -t competitionops:ocr \
+    -t competitionops/api:dev-ocr \
     -f infra/docker/Dockerfile .
 ```
+
+The image name must match the kustomize overlay's ``newName:
+competitionops/api`` (see ``infra/k8s/overlays/<env>/kustomization.yaml``).
+Use ``-ocr`` as the tag suffix when ``INCLUDE_OCR=1`` is set so the
+slim and OCR builds can coexist in a registry; e.g. for staging use
+``-t competitionops/api:staging-ocr`` and update the overlay's
+``newTag`` (or pass ``--load`` directly into a kind / minikube cluster
+for dev). Round-3 M3 closed an alignment gap where the README previously taught
+a legacy single-name tag that never matched the overlay's
+``newName`` and silently produced ``ImagePullBackOff``.
 
 Then at runtime, set ``PDF_ADAPTER=docling`` in the configmap (the
 commented placeholder is in ``infra/k8s/base/configmap.yaml``). The

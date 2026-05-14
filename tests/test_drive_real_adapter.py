@@ -309,6 +309,41 @@ async def test_real_create_folder_surfaces_network_error_as_failed_action() -> N
     assert "SECRET-TOKEN" not in err
 
 
+@pytest.mark.asyncio
+async def test_real_create_folder_surfaces_invalid_url_as_failed_action() -> None:
+    """Round-3 M4: ``httpx.InvalidURL`` is its OWN exception class —
+    not a subclass of ``httpx.HTTPError`` — so the existing
+    ``except httpx.HTTPError`` clause didn't catch it. Drive's search
+    URL embeds ``q=name='<folder_name>'``; a folder name containing
+    bytes that fail URL parsing (e.g. raw newlines from a
+    copy-pasted secret) raised ``httpx.InvalidURL`` whose ``str(exc)``
+    typically echoes the URL fragment. M4 closes the gap: catch it
+    alongside HTTPError, return the class name only."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"files": []})
+        raise httpx.InvalidURL("bad url: SECRET-LEAKED-IN-MESSAGE")
+
+    client = _mock_transport(handler)
+    adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
+
+    action = ExternalAction(
+        action_id="act_drive_invalid_url",
+        type="google.drive.create_competition_folder",
+        target_system="google_drive",
+        payload={"folder_name": "Bad Folder Name"},
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    result = await adapter.execute(action, dry_run=False)
+
+    assert result.status == "failed"
+    assert "InvalidURL" in (result.error or "")
+    err = result.error or ""
+    assert "SECRET-LEAKED-IN-MESSAGE" not in err
+    assert "bad url" not in err
+
+
 # ---------------------------------------------------------------------------
 # Dry-run safety (CLAUDE.md rule #3, ties to deep-review finding C1)
 # ---------------------------------------------------------------------------

@@ -337,6 +337,133 @@ def test_readme_documents_ocr_build_invocation() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Round-3 M3 — image name alignment between Dockerfile / README and overlays
+#
+# Background. The kustomize overlays rewrite the base distroless image to
+# ``competitionops/api:{dev,staging,prod}`` (see ``newName`` in each
+# overlay's ``images:`` block). Operators following the README, however,
+# saw ``docker build -t competitionops:ocr`` — different repo name AND a
+# tag the overlays never select. ``kubectl apply -k overlays/dev`` then
+# pulled ``competitionops/api:dev``, which doesn't exist on the local
+# registry, and the pod stuck at ``ImagePullBackOff``. M3 closes the gap
+# by aligning the documented build command with the kustomize image
+# patches: ``competitionops/api:{env}`` for the slim build,
+# ``competitionops/api:{env}-ocr`` when ``INCLUDE_OCR=1`` is passed.
+# ---------------------------------------------------------------------------
+
+
+def test_overlay_image_names_form_a_single_registry_path() -> None:
+    """All three overlays must rewrite the base image to the SAME
+    ``newName`` (``competitionops/api``) — only ``newTag`` varies per
+    environment. If a future overlay drifts (typo, fork) the
+    docker-build commands in README / Dockerfile would teach the
+    operator a wrong tag."""
+    new_names: set[str] = set()
+    for env in ("dev", "staging", "prod"):
+        kustomization = _load_yaml(_OVERLAYS / env / "kustomization.yaml")
+        images = kustomization.get("images") or []
+        for entry in images:
+            new_names.add(entry["newName"])
+
+    assert new_names == {"competitionops/api"}, (
+        "All overlays must rewrite the base image to the same "
+        f"``newName=competitionops/api``; saw {sorted(new_names)}. "
+        "Drift here means README's docker-build instructions can't be "
+        "kept aligned across environments."
+    )
+
+
+def test_readme_ocr_build_command_tags_overlay_compatible_image_name() -> None:
+    """The README's docker-build example must tag the image with the
+    same repo name that the overlays rewrite to. Otherwise the
+    documented command produces an image the overlays don't reference,
+    and the operator hits ImagePullBackOff after ``kubectl apply``.
+
+    Specifically: the README must tag ``competitionops/api:`` (NOT
+    the legacy ``competitionops:ocr``) so the operator can immediately
+    plug the result into a ``kustomize edit set image`` call against
+    any overlay.
+    """
+    content = (_K8S / "README.md").read_text(encoding="utf-8")
+    # The legacy ``competitionops:ocr`` form is what we are migrating
+    # AWAY from — it does not match overlay's ``competitionops/api`` repo.
+    assert "competitionops:ocr" not in content, (
+        "README must not teach the legacy ``competitionops:ocr`` tag "
+        "(predates kustomize overlay alignment). Update the docker-build "
+        "example to ``competitionops/api:<env>-ocr`` so the resulting "
+        "image is directly referenced by the overlay image-patch."
+    )
+    assert "competitionops/api" in content, (
+        "README must tag images as ``competitionops/api:<env>[-ocr]`` "
+        "so the docker-build command produces an image the kustomize "
+        "overlays already reference via ``newName``."
+    )
+
+
+def test_dockerfile_ocr_build_comment_tags_overlay_compatible_image_name() -> None:
+    """Dockerfile header comment shows the canonical OCR-enabled build
+    invocation. Same alignment rule as the README test above —
+    operators reading the Dockerfile in isolation must also see the
+    overlay-compatible tag, not the legacy ``competitionops:ocr``."""
+    content = (_REPO_ROOT / "infra/docker/Dockerfile").read_text(encoding="utf-8")
+    assert "competitionops:ocr" not in content, (
+        "Dockerfile header comment must not show the legacy "
+        "``competitionops:ocr`` tag — it does not match the kustomize "
+        "overlay's ``competitionops/api`` repo and trips operators who "
+        "copy-paste it. Use ``competitionops/api:<env>-ocr`` instead."
+    )
+    assert "competitionops/api" in content, (
+        "Dockerfile header comment must tag the build with "
+        "``competitionops/api:<env>[-ocr]`` so the resulting image "
+        "plugs into the kustomize overlay image-patch without a rename."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round-3 M5 — MemorySaver gap in the H2 operator checklist
+#
+# Background. The 4-step H2-lift checklist in ``infra/k8s/README.md``
+# covers PVC + configmap + audit + replicas. It does NOT mention the
+# LangGraph workflow checkpointer, which is currently the in-process
+# ``MemorySaver`` set in ``workflows/graph.py``. An operator who
+# successfully follows the 4 steps and bumps ``replicas>1`` would
+# still hit a multi-pod bug: a workflow checkpoint created on pod A
+# is invisible to pod B, so ``POST /executions/{plan_id}/run`` after
+# approval can crash or restart from scratch depending on routing.
+# The fix is doc-only — operators need to know they must also migrate
+# the checkpointer (SqliteSaver on shared PVC or PostgresSaver on
+# shared DB) before flipping ``replicas`` away from 1.
+# ---------------------------------------------------------------------------
+
+
+def test_readme_h2_checklist_warns_about_memory_saver_checkpointer() -> None:
+    """The H2 operator checklist must explicitly mention the workflow
+    ``MemorySaver`` checkpointer as a multi-pod gap. Without this,
+    operators completing the 4 PVC / configmap / audit / replicas
+    steps assume they're done and hit a routing bug on the first
+    approval-then-execute round-trip across pods."""
+    content = (_K8S / "README.md").read_text(encoding="utf-8")
+    assert "MemorySaver" in content, (
+        "README's H2 operator checklist must mention ``MemorySaver`` "
+        "as a multi-pod gap. The 4-step checklist is otherwise "
+        "complete-looking but leaves the workflow checkpointer as a "
+        "process-local store, breaking POST /executions/{plan_id}/run "
+        "the moment routing lands on a pod that didn't run the "
+        "approval step."
+    )
+    # And it must name at least one of the migration targets so the
+    # operator has a concrete next action, not just a warning.
+    assert any(
+        marker in content
+        for marker in ("SqliteSaver", "PostgresSaver", "langgraph-checkpoint")
+    ), (
+        "README must name a migration target (SqliteSaver, "
+        "PostgresSaver, or the langgraph-checkpoint package) so the "
+        "warning ships with a fix, not just a complaint."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Secret template
 # ---------------------------------------------------------------------------
 
