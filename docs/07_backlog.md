@@ -101,9 +101,13 @@ Acceptance:
 Status: **In Progress** — Sprint 0 (tracer bootstrap) ✅, Sprint 2
 (ExecutionService root + adapter_call spans) ✅, Sprint 3 (root-span
 plan_id/actor attributes, adapter_call plan_id, result.status=failed →
-span STATUS=ERROR mapping, M1 OTel auto-exception coverage) ✅.
+span STATUS=ERROR mapping, M1 OTel auto-exception coverage) ✅,
+Sprint 4 (FastAPI auto-instrumentation via FastAPIInstrumentor +
+six MCP tool spans `mcp.tool.*` with attribute coverage; shared
+decorators extracted to `telemetry/decorators.py`) ✅.
 
-Next: Sprint 4 — FastAPI auto-instrumentation + MCP tool spans. See
+Next: Sprint 5 — Counter / Histogram metrics (action_status_total,
+action_execution_duration_seconds, audit_records_total). See
 `docs/10_p2_roadmap.md` for the full sprint sequence.
 
 ### P2-005 — Local OCR / layout parsing with GPU

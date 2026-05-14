@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
@@ -19,8 +20,19 @@ from competitionops.schemas import (
 from competitionops.services.brief_extractor import BriefExtractor
 from competitionops.services.execution import ExecutionService, PlanNotFoundError
 from competitionops.services.planner import CompetitionPlanner
+from competitionops.telemetry import setup_tracer_provider
+
+# Initialise the OTel SDK TracerProvider before app instantiation so the
+# FastAPI auto-instrumentation middleware emits real (not NonRecording)
+# spans. Idempotent — repeated imports under pytest do not re-create.
+setup_tracer_provider()
 
 app = FastAPI(title="CompetitionOps Agent", version="0.1.0")
+
+# Attach OTel auto-instrumentation. ``instrument_app`` adds an ASGI
+# middleware that creates a SERVER-kind span per request with attributes
+# ``http.route / http.method / http.status_code``. Sprint 4 P2-004.
+FastAPIInstrumentor.instrument_app(app)
 
 
 @lru_cache(maxsize=1)

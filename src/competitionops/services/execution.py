@@ -12,10 +12,9 @@ swappable through AdapterRegistry so tests can inject tracking mocks.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 from datetime import datetime
-from typing import Awaitable, Callable, Final, ParamSpec, TypeVar
+from typing import Final
 from zoneinfo import ZoneInfo
 
 from opentelemetry import trace
@@ -32,64 +31,10 @@ from competitionops.schemas import (
     ExternalAction,
     ExternalActionResult,
 )
+from competitionops.telemetry import annotate_span, traced_async, traced_sync
 
 _TZ = ZoneInfo("Asia/Taipei")
 _tracer = trace.get_tracer("competitionops.execution")
-
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
-
-
-def _traced_sync(name: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
-    """Wrap a sync method in an OTel root span named ``name``."""
-
-    def decorator(func: Callable[_P, _R]) -> Callable[_P, _R]:
-        @functools.wraps(func)
-        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-            with _tracer.start_as_current_span(name):
-                return func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def _traced_async(
-    name: str,
-) -> Callable[[Callable[_P, Awaitable[_R]]], Callable[_P, Awaitable[_R]]]:
-    """Wrap an async method in an OTel root span named ``name``."""
-
-    def decorator(
-        func: Callable[_P, Awaitable[_R]],
-    ) -> Callable[_P, Awaitable[_R]]:
-        @functools.wraps(func)
-        async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
-            with _tracer.start_as_current_span(name):
-                return await func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def _annotate_root_span(
-    *,
-    plan_id: str,
-    actor: str,
-    action_id: str | None = None,
-) -> None:
-    """Attach plan_id / actor (and optional action_id) onto the active root span.
-
-    Called at the top of each public ExecutionService method body. The
-    decorator above already opened the span, so ``trace.get_current_span()``
-    here returns that root span. NonRecording spans (no SDK provider) make
-    these set_attribute calls silent no-ops.
-    """
-    span = trace.get_current_span()
-    span.set_attribute("plan_id", plan_id)
-    span.set_attribute("actor", actor)
-    if action_id is not None:
-        span.set_attribute("action_id", action_id)
 
 FORBIDDEN_ACTION_TYPES: Final[frozenset[str]] = frozenset(
     {
@@ -119,7 +64,7 @@ class ExecutionService:
         self.audit_log = audit_log
         self.settings = settings
 
-    @_traced_async("execution.approve_and_execute")
+    @traced_async("execution.approve_and_execute")
     async def approve_and_execute(
         self,
         plan_id: str,
@@ -127,7 +72,7 @@ class ExecutionService:
         approved_by: str,
         allow_reexecute: bool = False,
     ) -> ApprovalResponse:
-        _annotate_root_span(plan_id=plan_id, actor=approved_by)
+        annotate_span(plan_id=plan_id, actor=approved_by)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -176,7 +121,7 @@ class ExecutionService:
     # Single-action approval (MCP incremental flow)
     # ------------------------------------------------------------------
 
-    @_traced_sync("execution.approve_single_action")
+    @traced_sync("execution.approve_single_action")
     def approve_single_action(
         self,
         plan_id: str,
@@ -191,7 +136,7 @@ class ExecutionService:
         wrong semantics when Claude wants to approve actions one at a time
         across multiple tool calls.
         """
-        _annotate_root_span(plan_id=plan_id, actor=approved_by, action_id=action_id)
+        annotate_span(plan_id=plan_id, actor=approved_by, action_id=action_id)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -253,7 +198,7 @@ class ExecutionService:
     # Two-phase API: approve-only and run-only
     # ------------------------------------------------------------------
 
-    @_traced_sync("execution.approve_actions")
+    @traced_sync("execution.approve_actions")
     def approve_actions(
         self,
         plan_id: str,
@@ -269,7 +214,7 @@ class ExecutionService:
         - Already-``executed`` actions are left untouched and surfaced as
           ``skipped`` in the decision so callers see the no-op explicitly.
         """
-        _annotate_root_span(plan_id=plan_id, actor=approved_by)
+        annotate_span(plan_id=plan_id, actor=approved_by)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -329,7 +274,7 @@ class ExecutionService:
             skipped=skipped,
         )
 
-    @_traced_async("execution.run_approved")
+    @traced_async("execution.run_approved")
     async def run_approved(
         self,
         plan_id: str,
@@ -344,7 +289,7 @@ class ExecutionService:
         set; any id whose action is not in ``approved`` status surfaces as
         ``skipped`` with a ``not approved`` message — never as ``executed``.
         """
-        _annotate_root_span(plan_id=plan_id, actor=executed_by)
+        annotate_span(plan_id=plan_id, actor=executed_by)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
