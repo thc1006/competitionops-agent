@@ -33,6 +33,15 @@ Idempotency (Tier 0 #5):
 Out of scope for this commit:
 - 429 / 5xx retry + exponential backoff on the POST itself.
 
+Dry-run gate (C1):
+- Real mode short-circuits ``dry_run=True`` BEFORE any HTTP call and
+  returns a synthetic ``dry_run_<sha1(title)[:8]>`` external_id. This
+  closes the C1 finding where ``Settings.dry_run_default=True`` could
+  silently write to Plane on the very first preview. Mock mode has no
+  side effects so it still flows through ``_mock_create_issue``
+  unchanged — preserves the deterministic ``mock_issue_*`` ids existing
+  audit fixtures depend on.
+
 The httpx client is injectable through ``__init__(client=...)`` so tests
 use ``httpx.MockTransport`` and never touch the network.
 """
@@ -235,6 +244,14 @@ class PlaneAdapter:
         self.calls.append(
             {"action_id": action.action_id, "type": action.type, "dry_run": dry_run}
         )
+        # C1 — Real-mode adapters MUST honor dry_run BEFORE any HTTP call.
+        # Mock mode has no side effects so it stays on the normal path.
+        if dry_run and self.real_mode and action.type == "plane.create_issue":
+            title = action.payload.get("title")
+            if title:
+                return self._dry_run_preview(action, title=title)
+            # Fall through so the KeyError path below reports the
+            # missing-title error consistently.
         try:
             if action.type == "plane.create_issue":
                 payload = action.payload
@@ -289,3 +306,21 @@ class PlaneAdapter:
 
     def _mode_label(self) -> str:
         return "real" if self.real_mode else "mock"
+
+    def _dry_run_preview(
+        self, action: ExternalAction, *, title: str
+    ) -> ExternalActionResult:
+        """Build a synthetic preview without hitting Plane.
+
+        The external_id is hashed off the title so the same plan
+        produces a stable preview id across re-runs — handy for the
+        approval UI showing PMs which issue would be created."""
+        preview_id = f"dry_run_{_hash(title)}"
+        return ExternalActionResult(
+            action_id=action.action_id,
+            target_system="plane",
+            status="dry_run",
+            external_id=preview_id,
+            external_url=None,
+            message=f"Plane issue preview ({self._mode_label()}, dry_run).",
+        )

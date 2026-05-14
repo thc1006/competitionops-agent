@@ -84,12 +84,13 @@ def _wire_otel_exporters() -> None:
     if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
         # Lazy import: only the production deployment path needs the
         # gRPC exporter package, which is gated behind the ``otel`` extra.
-        # ``import-not-found`` is silenced because dev venvs (uv sync without
-        # --extra otel) legitimately don't have these stubs installed.
-        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (  # type: ignore[import-not-found]
+        # Dual ignore code: ``import-not-found`` covers dev venvs without
+        # ``--extra otel``; ``unused-ignore`` keeps mypy silent when the
+        # extra IS installed.
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (  # type: ignore[import-not-found, unused-ignore]
             OTLPMetricExporter,
         )
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # type: ignore[import-not-found]
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # type: ignore[import-not-found, unused-ignore]
             OTLPSpanExporter,
         )
 
