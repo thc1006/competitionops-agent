@@ -23,14 +23,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/competitionops", "src/competitionops_mcp"]
 
+# Runtime feature extras follow PEP 621 — operators install per-feature
+# via ``uv sync --extra <name>`` (or ``pip install .[<name>]``).
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "ruff>=0.6.0",
-    "mypy>=1.11.0",
-    "coverage>=7.6.0"
-]
 google = [
     "google-api-python-client>=2.140.0",
     "google-auth>=2.33.0",
@@ -51,12 +46,17 @@ ocr = [
     "docling>=2.0.0"
 ]
 
-[tool.uv]
-dev-dependencies = [
+# Dev tooling follows PEP 735 dependency-groups. ``uv sync`` auto-installs
+# this group; ``uv sync --no-dev`` opts out (e.g. in production images).
+# Replaces the deprecated ``[tool.uv].dev-dependencies`` table that
+# every ``uv sync`` / ``uv run`` invocation used to warn about.
+[dependency-groups]
+dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.6.0",
-    "mypy>=1.11.0"
+    "mypy>=1.11.0",
+    "coverage>=7.6.0",
 ]
 
 [tool.ruff]
