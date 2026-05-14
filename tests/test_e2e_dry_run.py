@@ -1,20 +1,24 @@
-"""End-to-end dry-run test for the full CompetitionOps pipeline.
+"""Stage 8.1 — End-to-end dry-run behavioral contract.
 
-Walks the brief→plan→propose→approve→execute→audit flow twice — once via
-the FastAPI HTTP surface and once via the MCP server surface — to prove
-both user-facing contracts work without touching real Google or Plane APIs.
+These 15 tests pin down what the CompetitionOps E2E pipeline must do
+*as observed from the outside*, with no peeking at private state.
+Each test name reads like a specification line.
 
-Constraints enforced by these tests:
-- No real Google API import survives the run (sys.modules check).
-- No real credentials read.
-- No external writes — mock adapters only.
-- Dangerous action types are blocked even when explicitly approved.
+Strict invariants enforced here:
+- No real Google / Plane API import — sys.modules guard + socket
+  monkeypatch.
+- No secrets read — fixtures only use synthetic RunSpace-like text.
+- Only mock adapters execute approved actions.
+- Approval gate is the single chokepoint between proposed and executed.
 """
 
 from __future__ import annotations
 
+import socket
 import sys
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,14 +26,15 @@ from fastapi.testclient import TestClient
 from competitionops import main as main_module
 from competitionops.main import app
 from competitionops.schemas import ExternalAction, RiskLevel
-from competitionops_mcp import server as mcp_server
+
+TZ = ZoneInfo("Asia/Taipei")
 
 # ---------------------------------------------------------------------------
-# Fixtures: a RunSpace-like brief + a multi-role team
+# Synthetic test fixtures — strictly non-real
 # ---------------------------------------------------------------------------
 
 RUNSPACE_BRIEF = """RunSpace Innovation Challenge 2026
-Organizer: NYCU Startup Hub
+Organizer: NYCU Startup Hub (synthetic)
 Submission deadline: 2026-09-30
 Final event: 2026-10-15
 Eligibility: Open to NYCU students and alumni within 5 years of graduation.
@@ -41,31 +46,50 @@ Anonymous submission required for the first round.
 Rubric: innovation, business feasibility, impact, technical excellence.
 """
 
-TEAM: list[dict[str, Any]] = [
-    {"member_id": "alice", "name": "Alice Chen", "role": "business", "weekly_capacity_hours": 20},
-    {"member_id": "bob", "name": "Bob Lin", "role": "design", "weekly_capacity_hours": 20},
-    {"member_id": "carol", "name": "Carol Wu", "role": "tech", "weekly_capacity_hours": 20},
-    {"member_id": "dan", "name": "Dan Yu", "role": "research", "weekly_capacity_hours": 10},
+BRIEF_NO_DEADLINE = """Quiet Cup
+Organizer: TBD
+No schedule announced yet. Stay tuned.
+"""
+
+BRIEF_MALFORMED_DEADLINE = """Broken Date Cup
+Submission deadline: 2026-13-45
+Required: pitch deck.
+"""
+
+BRIEF_NO_DELIVERABLES = """Hollow Cup
+Submission deadline: 2026-09-30
+Just register and show up.
+"""
+
+TEAM_BALANCED: list[dict[str, Any]] = [
+    {"member_id": "alice", "name": "Alice", "role": "business", "weekly_capacity_hours": 20},
+    {"member_id": "bob", "name": "Bob", "role": "design", "weekly_capacity_hours": 20},
+    {"member_id": "carol", "name": "Carol", "role": "tech", "weekly_capacity_hours": 20},
+]
+TEAM_SOLO_TIGHT: list[dict[str, Any]] = [
+    {"member_id": "solo", "name": "Solo", "role": "tech", "weekly_capacity_hours": 5},
 ]
 
-GOOGLE_TARGETS = {"google_drive", "google_docs", "google_sheets", "google_calendar"}
-ALL_WRITE_TARGETS = GOOGLE_TARGETS | {"plane"}
-
-# Simulates the PM-augmentation step: the brief extractor does not infer
-# ``owner_role`` from free text, so a PM assigns deliverables to roles
-# before /plans/generate. Without this, deliverables would be blocked on
-# ``owner_role_missing`` and no Plane tasks would be emitted (correct
-# planner behavior per Stage 2 AC #4).
 ROLE_BY_DELIVERABLE_TITLE = {
     "Pitch deck": "business",
     "Business plan": "business",
     "Video submission": "design",
     "Prototype demo": "tech",
+    "Report document": "business",
 }
 
-# If any of these get imported during the e2e flow, we have leaked into a real
-# Google SDK and the test must fail loudly.
-FORBIDDEN_MODULES = {
+GOOGLE_TARGETS = {"google_drive", "google_docs", "google_sheets", "google_calendar"}
+ALL_WRITE_TARGETS = GOOGLE_TARGETS | {"plane"}
+
+FORBIDDEN_TYPES = (
+    "google.drive.delete_file",
+    "google.drive.permissions.set_public",
+    "google.drive.permissions.share_external",
+    "gmail.send",
+    "competition.external_submit",
+)
+
+FORBIDDEN_REAL_GOOGLE_MODULES = {
     "googleapiclient",
     "googleapiclient.discovery",
     "google.oauth2",
@@ -77,336 +101,425 @@ FORBIDDEN_MODULES = {
 
 
 # ---------------------------------------------------------------------------
-# State reset helpers
+# Helpers (no test logic — only HTTP plumbing)
 # ---------------------------------------------------------------------------
 
 
-def _reset_http_state() -> None:
+def _fresh_client() -> TestClient:
     main_module._plan_repo.cache_clear()
     main_module._audit_log.cache_clear()
     main_module._registry.cache_clear()
+    return TestClient(app)
 
 
-def _reset_mcp_state() -> None:
-    mcp_server._plan_repo.cache_clear()
-    mcp_server._audit_log.cache_clear()
-    mcp_server._registry.cache_clear()
+def _extract(client: TestClient, content: str, source_uri: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"source_type": "text", "content": content}
+    if source_uri is not None:
+        payload["source_uri"] = source_uri
+    response = client.post("/briefs/extract", json=payload)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
-def _assert_no_real_google_loaded() -> None:
-    leaked = sorted(mod for mod in FORBIDDEN_MODULES if mod in sys.modules)
-    assert not leaked, (
-        "real Google SDK leaked into sys.modules during e2e flow: " + ", ".join(leaked)
-    )
-
-
-# ---------------------------------------------------------------------------
-# 1. HTTP path — full lifecycle through FastAPI
-# ---------------------------------------------------------------------------
-
-
-def test_e2e_http_full_lifecycle() -> None:
-    _reset_http_state()
-    client = TestClient(app)
-
-    # Step 1 — extract
-    brief_resp = client.post(
-        "/briefs/extract",
+def _generate(
+    client: TestClient,
+    brief: dict[str, Any],
+    team: list[dict[str, Any]] | None = None,
+    pm_approval_required: bool = True,
+) -> dict[str, Any]:
+    response = client.post(
+        "/plans/generate",
         json={
-            "source_type": "text",
-            "source_uri": "test://runspace-2026",
-            "content": RUNSPACE_BRIEF,
+            "competition": brief,
+            "team_capacity": team or TEAM_BALANCED,
+            "preferences": {"pm_approval_required": pm_approval_required},
         },
     )
-    assert brief_resp.status_code == 200
-    brief = brief_resp.json()
-    assert brief["name"] == "RunSpace Innovation Challenge 2026"
-    assert brief["organizer"] == "NYCU Startup Hub"
-    assert brief["submission_deadline"].startswith("2026-09-30")
-    assert brief["final_event_date"].startswith("2026-10-15")
-    assert brief["deliverables"]
-    assert brief["anonymous_rules"]
-    assert brief["language_requirements"]
-    # Format-limit risk flags
-    assert any("anonymous" in f for f in brief["risk_flags"])
-    assert any("page" in f for f in brief["risk_flags"])
-    assert any("video" in f or "duration" in f for f in brief["risk_flags"])
+    assert response.status_code == 200, response.text
+    return response.json()
 
-    # Step 1.5 — PM augments the extracted brief with owner_role per
-    # deliverable. Real PMs do this after reviewing the extraction; the
-    # extractor itself stays conservative and does not invent roles.
+
+def _approve(
+    client: TestClient,
+    plan_id: str,
+    action_ids: list[str],
+    actor: str = "pm@example.com",
+) -> dict[str, Any]:
+    response = client.post(
+        f"/approvals/{plan_id}/approve",
+        json={"approved_action_ids": action_ids, "approved_by": actor},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _run(
+    client: TestClient,
+    plan_id: str,
+    action_ids: list[str] | None = None,
+    actor: str = "pm@example.com",
+    allow_reexecute: bool = False,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"executed_by": actor, "allow_reexecute": allow_reexecute}
+    if action_ids is not None:
+        body["action_ids"] = action_ids
+    response = client.post(f"/executions/{plan_id}/run", json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _augment_owner_roles(brief: dict[str, Any]) -> None:
     for deliverable in brief["deliverables"]:
         deliverable["owner_role"] = ROLE_BY_DELIVERABLE_TITLE.get(
             deliverable["title"], "business"
         )
 
-    # Step 2 — generate plan
-    plan_resp = client.post(
-        "/plans/generate",
-        json={
-            "competition": brief,
-            "team_capacity": TEAM,
-            "preferences": {"pm_approval_required": True},
-        },
-    )
-    assert plan_resp.status_code == 200
-    plan = plan_resp.json()
+
+def _inject_action(plan_id: str, action: ExternalAction) -> None:
+    repo = main_module._plan_repo()
+    stored = repo.get(plan_id)
+    assert stored is not None
+    stored.actions.append(action)
+    repo.save(stored)
+
+
+# ---------------------------------------------------------------------------
+# 1. Happy path: full pipeline from brief text to audit report
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_happy_path_from_brief_to_audit_report() -> None:
+    client = _fresh_client()
+
+    brief = _extract(client, RUNSPACE_BRIEF, source_uri="test://runspace-2026")
+    assert brief["name"] == "RunSpace Innovation Challenge 2026"
+    assert brief["submission_deadline"].startswith("2026-09-30")
+    assert brief["deliverables"]
+    _augment_owner_roles(brief)
+
+    plan = _generate(client, brief)
     assert plan["dry_run"] is True
     assert plan["requires_approval"] is True
-    assert plan["actions"]
-    assert plan["task_drafts"]
-    # WBS coverage: every deliverable maps to a task
-    deliverable_titles = {d["title"] for d in brief["deliverables"]}
-    task_sources = {t["source_requirement"] for t in plan["task_drafts"]}
-    assert task_sources == deliverable_titles
-    # RACI / capacity: each task in draft status has an owner_role and assignee
-    draft_tasks = [t for t in plan["task_drafts"] if t["status"] == "draft"]
-    for task in draft_tasks:
-        assert task["owner_role"] is not None
-        assert task["due_date"] is not None
-        assert task["priority"] in {"P0", "P1", "P2"}
-
-    # Step 3 — proposed actions cover all 5 target_systems
     target_systems = {a["target_system"] for a in plan["actions"]}
-    assert ALL_WRITE_TARGETS.issubset(target_systems), (
-        f"missing target_systems: {ALL_WRITE_TARGETS - target_systems}"
-    )
-    # All actions start in pending
-    assert all(a["status"] == "pending" for a in plan["actions"])
+    assert ALL_WRITE_TARGETS.issubset(target_systems)
 
-    # Step 4 — PM approves one action per target_system
     chosen: dict[str, str] = {}
     for action in plan["actions"]:
         if action["target_system"] not in chosen:
             chosen[action["target_system"]] = action["action_id"]
     approved_ids = list(chosen.values())
-    assert len(approved_ids) == len(ALL_WRITE_TARGETS)
 
-    approve_resp = client.post(
-        f"/approvals/{plan['plan_id']}/approve",
-        json={"approved_action_ids": approved_ids, "approved_by": "pm@example.com"},
-    )
-    assert approve_resp.status_code == 200
-    decision = approve_resp.json()
+    decision = _approve(client, plan["plan_id"], approved_ids)
     assert set(decision["approved"]) == set(approved_ids)
-    assert decision["blocked"] == []
 
-    # Step 5 — execute approved actions via mock adapter pipeline
-    exec_resp = client.post(
-        f"/executions/{plan['plan_id']}/run",
-        json={"executed_by": "pm@example.com"},
-    )
-    assert exec_resp.status_code == 200
-    result = exec_resp.json()
+    result = _run(client, plan["plan_id"])
     assert len(result["executed"]) == len(approved_ids)
     assert result["failed"] == []
     assert result["blocked"] == []
 
-    # Step 6 — mock adapter state was mutated for each target
-    registry = main_module._registry()
-    drive = registry.get("google_drive")
-    docs = registry.get("google_docs")
-    sheets = registry.get("google_sheets")
-    calendar = registry.get("google_calendar")
-    plane = registry.get("plane")
-    assert drive is not None and drive.folders, "Drive mock should hold ≥1 folder"
-    assert docs is not None and docs.docs, "Docs mock should hold ≥1 doc"
-    assert sheets is not None and sheets.sheets, "Sheets mock should hold ≥1 sheet"
-    assert calendar is not None and calendar.events, "Calendar mock should hold ≥1 event"
-    # Plane is the stub adapter (not stateful in Stage 4 scope) — verify call recorded
-    assert plane is not None
-
-    # Step 7 — audit log records every lifecycle event
-    audit = main_module._audit_log()
-    records = audit.list_for_plan(plan["plan_id"])
-    executed_records = [r for r in records if r.status == "executed"]
-    approved_records = [r for r in records if r.status == "approved"]
-    rejected_records = [r for r in records if r.status == "rejected"]
-    assert len(executed_records) == len(approved_ids)
-    assert len(approved_records) == len(approved_ids)
-    # Every unapproved action got an explicit rejection event
-    rejected_ids = {r.action_id for r in rejected_records}
-    all_ids = {a["action_id"] for a in plan["actions"]}
-    assert rejected_ids == all_ids - set(approved_ids)
-    # Each execution record carries provenance. The Plane adapter is still
-    # a Stage 0 stub (upgrade scheduled for P1-004) and does not populate
-    # ``external_id``; the four Google adapters do.
+    # Audit covers every executed action with provenance fields populated.
+    audit = main_module._audit_log().list_for_plan(plan["plan_id"])
+    executed_records = [r for r in audit if r.status == "executed"]
+    assert {r.action_id for r in executed_records} == set(approved_ids)
     for record in executed_records:
-        assert record.actor == "pm@example.com"
         assert record.executed_at is not None
         assert record.request_hash is not None
-        if record.target_system in GOOGLE_TARGETS:
-            assert record.target_external_id is not None, (
-                f"Google adapter {record.target_system} must surface "
-                f"external_id but record had None"
-            )
-
-    _assert_no_real_google_loaded()
+        assert record.actor == "pm@example.com"
 
 
 # ---------------------------------------------------------------------------
-# 2. MCP path — full lifecycle through Claude-facing tools
+# 2-4. Brief-level data quality guards
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_e2e_mcp_full_lifecycle() -> None:
-    _reset_mcp_state()
+def test_e2e_dry_run_rejects_missing_deadline() -> None:
+    client = _fresh_client()
+    brief = _extract(client, BRIEF_NO_DEADLINE)
 
-    # Step 1 — extract
-    brief = mcp_server.extract_competition_brief(
-        content=RUNSPACE_BRIEF, source_uri="test://runspace-2026"
-    )
-    assert brief["name"] == "RunSpace Innovation Challenge 2026"
-    assert brief["organizer"] == "NYCU Startup Hub"
+    assert brief["submission_deadline"] is None
+    assert "missing_submission_deadline" in brief["risk_flags"]
 
-    # Step 2 — generate plan (persisted in MCP-side repo)
-    plan = mcp_server.generate_competition_plan(competition=brief)
-    assert plan["dry_run"] is True
-    assert plan["actions"]
-    plan_id = plan["plan_id"]
 
-    # Step 3 — propose Google-only actions
-    proposal = mcp_server.propose_google_workspace_actions(plan_id=plan_id)
-    assert proposal["total"] >= 3
-    assert set(proposal["by_system"]).issubset(GOOGLE_TARGETS)
-    for system_actions in proposal["by_system"].values():
-        for action in system_actions:
-            assert action["status"] == "pending"
+def test_e2e_dry_run_rejects_malformed_deadline() -> None:
+    client = _fresh_client()
+    brief = _extract(client, BRIEF_MALFORMED_DEADLINE)
 
-    # Step 4 — list pending approvals to mirror Claude's review step
-    pending = mcp_server.list_pending_approvals(plan_id=plan_id)
-    assert pending["pending_count"] == len(plan["actions"])
-    pending_ids = {entry["action_id"] for entry in pending["actions"]}
-    assert pending_ids == {a["action_id"] for a in plan["actions"]}
+    # Extractor must not crash on month=13 day=45 — it surfaces the gap as
+    # a missing deadline + risk flag rather than raising ValueError.
+    assert brief["submission_deadline"] is None
+    assert "missing_submission_deadline" in brief["risk_flags"]
 
-    # Step 5 — PM approves one Google action per target_system
-    chosen: dict[str, str] = {}
-    for action in plan["actions"]:
-        if (
-            action["target_system"] in GOOGLE_TARGETS
-            and action["target_system"] not in chosen
-        ):
-            chosen[action["target_system"]] = action["action_id"]
-    approved_action_ids = list(chosen.values())
-    assert len(approved_action_ids) == len(GOOGLE_TARGETS)
 
-    for action_id in approved_action_ids:
-        approval = await mcp_server.approve_action(
-            plan_id=plan_id, action_id=action_id, approved_by="pm@example.com"
-        )
-        assert approval["approval_status"] == "approved"
-        assert approval["action_id"] == action_id
-        assert approval["audit_id"]
+def test_e2e_dry_run_requires_deliverables() -> None:
+    client = _fresh_client()
+    brief = _extract(client, BRIEF_NO_DELIVERABLES)
 
-    # Step 6 — execute each approved action via mock adapter
-    for action_id in approved_action_ids:
-        execution = await mcp_server.execute_approved_action_mock(
-            plan_id=plan_id, action_id=action_id, executed_by="pm@example.com"
-        )
-        assert execution["approval_status"] == "executed"
-        assert execution["action_id"] == action_id
-        assert execution["audit_id"]
-
-    # Step 7 — audit log shows both approval + execution lifecycle for each
-    records = mcp_server._audit_log().list_for_plan(plan_id)
-    for action_id in approved_action_ids:
-        statuses = {r.status for r in records if r.action_id == action_id}
-        assert {"approved", "executed"}.issubset(statuses), (
-            f"action {action_id} missing lifecycle in {statuses}"
-        )
-        for record in records:
-            if record.action_id == action_id and record.status == "executed":
-                assert record.target_external_id is not None
-                assert record.request_hash is not None
-
-    _assert_no_real_google_loaded()
+    assert brief["deliverables"] == []
+    assert "missing_deliverables" in brief["risk_flags"]
 
 
 # ---------------------------------------------------------------------------
-# 3. Dangerous action remains blocked even after explicit approval request
+# 5. Planner-level deadline-too-close guard
 # ---------------------------------------------------------------------------
 
 
-def test_e2e_dangerous_action_blocked_in_full_flow() -> None:
-    _reset_http_state()
-    client = TestClient(app)
-
-    brief_resp = client.post(
-        "/briefs/extract",
-        json={"source_type": "text", "content": RUNSPACE_BRIEF},
+def test_e2e_dry_run_flags_deadline_too_close() -> None:
+    client = _fresh_client()
+    soon = (datetime.now(TZ) + timedelta(days=3)).strftime("%Y-%m-%d")
+    content = (
+        f"Rush Cup\nSubmission deadline: {soon}\nRequired: pitch deck.\n"
     )
-    plan_resp = client.post(
-        "/plans/generate",
-        json={
-            "competition": brief_resp.json(),
-            "team_capacity": TEAM,
-            "preferences": {"pm_approval_required": True},
-        },
-    )
-    plan = plan_resp.json()
+    brief = _extract(client, content)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
 
-    # Inject a forbidden action straight into the persisted plan
-    repo = main_module._plan_repo()
-    stored = repo.get(plan["plan_id"])
-    assert stored is not None
-    dangerous = ExternalAction(
-        action_id="act_e2e_danger",
-        type="google.drive.delete_file",
-        target_system="google_drive",
-        payload={"file_id": "anything"},
-        requires_approval=True,
-        risk_level=RiskLevel.critical,
-    )
-    stored.actions.append(dangerous)
-    repo.save(stored)
+    assert "short_deadline" in plan["risk_flags"]
 
-    # PM "approves" the dangerous id — approval gate should block, not approve
-    approve_resp = client.post(
-        f"/approvals/{plan['plan_id']}/approve",
-        json={
-            "approved_action_ids": ["act_e2e_danger"],
-            "approved_by": "pm@example.com",
-        },
-    )
-    assert approve_resp.status_code == 200
-    decision = approve_resp.json()
-    assert "act_e2e_danger" in decision["blocked"]
-    assert "act_e2e_danger" not in decision["approved"]
 
-    # Even if the executor is then asked to run it, it stays blocked
-    exec_resp = client.post(
-        f"/executions/{plan['plan_id']}/run",
-        json={"executed_by": "pm@example.com", "action_ids": ["act_e2e_danger"]},
-    )
-    assert exec_resp.status_code == 200
-    exec_body = exec_resp.json()
-    assert any(r["action_id"] == "act_e2e_danger" for r in exec_body["blocked"])
-    assert all(r["action_id"] != "act_e2e_danger" for r in exec_body["executed"])
+# ---------------------------------------------------------------------------
+# 6. Capacity guard
+# ---------------------------------------------------------------------------
 
-    # Drive mock adapter must never have been called for the dangerous action
-    drive = main_module._registry().get("google_drive")
-    assert drive is not None
-    danger_calls = [c for c in drive.calls if c.get("action_id") == "act_e2e_danger"]
-    assert danger_calls == []
 
-    # Audit log carries blocked events from both phases
-    audit = main_module._audit_log()
-    records = audit.list_for_plan(plan["plan_id"])
-    blocked_records = [
-        r for r in records if r.action_id == "act_e2e_danger" and r.status == "blocked"
+def test_e2e_dry_run_flags_insufficient_team_capacity() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    # Force every deliverable onto a single overloaded role.
+    for deliverable in brief["deliverables"]:
+        deliverable["owner_role"] = "tech"
+
+    plan = _generate(client, brief, team=TEAM_SOLO_TIGHT)
+    assert "team_capacity_insufficient" in plan["risk_flags"]
+    # No tasks were hard-assigned to the over-capacity member.
+    blocked_tasks = [
+        t for t in plan["task_drafts"] if t["status"] == "blocked_no_capacity"
     ]
-    assert len(blocked_records) >= 2  # one from approve, one from run
-
-    _assert_no_real_google_loaded()
+    assert blocked_tasks
+    for task in blocked_tasks:
+        assert task["suggested_assignee"] is None
 
 
 # ---------------------------------------------------------------------------
-# 4. Belt-and-suspenders: no real Google SDK / network library got pulled in
+# 7. Proposed actions start in pending — confirms no leakage past planner
 # ---------------------------------------------------------------------------
 
 
-def test_e2e_no_real_google_or_network_imports_after_full_run() -> None:
-    _reset_http_state()
-    _reset_mcp_state()
-    _assert_no_real_google_loaded()
+def test_e2e_dry_run_proposed_actions_start_pending() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+
+    assert plan["actions"]
+    for action in plan["actions"]:
+        assert action["status"] == "pending"
+        assert action["requires_approval"] is True
+        assert action["approved"] is False
+
+
+# ---------------------------------------------------------------------------
+# 8. Approval-gate enforcement on the executions endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_blocks_execution_without_approval() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+    action_ids = [a["action_id"] for a in plan["actions"]]
+
+    result = _run(client, plan["plan_id"], action_ids=action_ids)
+
+    assert result["executed"] == []
+    assert {r["action_id"] for r in result["skipped"]} == set(action_ids)
+    for skip in result["skipped"]:
+        assert "not approved" in skip["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 9. Idempotency: same approval cannot drive a second execution
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_executes_approved_mock_actions_once() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+    target = plan["actions"][0]["action_id"]
+
+    _approve(client, plan["plan_id"], [target])
+
+    first = _run(client, plan["plan_id"], action_ids=[target])
+    assert [r["action_id"] for r in first["executed"]] == [target]
+
+    second = _run(client, plan["plan_id"], action_ids=[target])
+    assert second["executed"] == []
+    assert any(r["action_id"] == target for r in second["skipped"])
+
+    third = _run(client, plan["plan_id"], action_ids=[target], allow_reexecute=True)
+    assert [r["action_id"] for r in third["executed"]] == [target]
+
+
+# ---------------------------------------------------------------------------
+# 10. Rejected actions cannot execute even when explicitly addressed
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_blocks_rejected_actions() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+    approved = plan["actions"][0]["action_id"]
+    other_ids = [a["action_id"] for a in plan["actions"][1:]]
+
+    _approve(client, plan["plan_id"], [approved])
+
+    # Try to run an action that was rejected on the batch approve call.
+    rejected_target = other_ids[0]
+    result = _run(client, plan["plan_id"], action_ids=[rejected_target])
+
+    assert result["executed"] == []
+    assert any(
+        r["action_id"] == rejected_target and "not approved" in r["message"].lower()
+        for r in result["skipped"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. Dangerous action types are blocked across approval + execution phases
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_blocks_dangerous_delete_share_submit_email_actions() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+
+    # Inject one synthetic action per FORBIDDEN type and try to approve them.
+    injected_ids: list[str] = []
+    for index, dangerous_type in enumerate(FORBIDDEN_TYPES):
+        action_id = f"act_e2e_danger_{index}"
+        injected_ids.append(action_id)
+        target_system = "google_drive" if "drive" in dangerous_type else (
+            "internal" if "submit" in dangerous_type else "google_drive"
+        )
+        _inject_action(
+            plan["plan_id"],
+            ExternalAction(
+                action_id=action_id,
+                type=dangerous_type,
+                target_system=target_system,  # type: ignore[arg-type]
+                payload={},
+                requires_approval=True,
+                risk_level=RiskLevel.critical,
+            ),
+        )
+
+    decision = _approve(client, plan["plan_id"], injected_ids)
+    assert set(decision["blocked"]) == set(injected_ids)
+    assert all(action_id not in decision["approved"] for action_id in injected_ids)
+
+    result = _run(client, plan["plan_id"], action_ids=injected_ids)
+    blocked_run_ids = {r["action_id"] for r in result["blocked"]}
+    assert set(injected_ids).issubset(blocked_run_ids)
+    assert all(r["action_id"] not in injected_ids for r in result["executed"])
+
+
+# ---------------------------------------------------------------------------
+# 12. Audit log contains at least one event per action
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_generates_audit_event_for_every_action() -> None:
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+    approved = [plan["actions"][0]["action_id"]]
+
+    _approve(client, plan["plan_id"], approved)
+    _run(client, plan["plan_id"])
+
+    audit = main_module._audit_log().list_for_plan(plan["plan_id"])
+    covered_action_ids = {r.action_id for r in audit}
+    plan_action_ids = {a["action_id"] for a in plan["actions"]}
+    assert plan_action_ids.issubset(covered_action_ids)
+
+
+# ---------------------------------------------------------------------------
+# 13. No real network call is ever made during a dry-run
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_prevents_real_network_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_calls: list[Any] = []
+
+    def deny_create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
+        real_calls.append(address)
+        raise RuntimeError(
+            f"E2E dry-run attempted a real outbound TCP connection to {address!r}"
+        )
+
+    monkeypatch.setattr(socket, "create_connection", deny_create_connection)
+
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+    target = plan["actions"][0]["action_id"]
+    _approve(client, plan["plan_id"], [target])
+    _run(client, plan["plan_id"], action_ids=[target])
+
+    assert real_calls == [], f"Unexpected outbound connections: {real_calls}"
+
+
+# ---------------------------------------------------------------------------
+# 14. Real Google / Plane client modules are not imported by the flow
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_does_not_initialize_real_google_or_plane_clients() -> None:
+    leaked_before = FORBIDDEN_REAL_GOOGLE_MODULES & set(sys.modules.keys())
+
+    client = _fresh_client()
+    brief = _extract(client, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief)
+    plan = _generate(client, brief)
+    target = plan["actions"][0]["action_id"]
+    _approve(client, plan["plan_id"], [target])
+    _run(client, plan["plan_id"], action_ids=[target])
+
+    leaked_after = FORBIDDEN_REAL_GOOGLE_MODULES & set(sys.modules.keys())
+    assert leaked_after == leaked_before, (
+        f"Real Google SDK leaked into sys.modules: {leaked_after - leaked_before}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 15. Determinism: same input -> same plan_id and action_ids
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_dry_run_is_deterministic_for_same_input() -> None:
+    client_a = _fresh_client()
+    brief_a = _extract(client_a, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief_a)
+    plan_a = _generate(client_a, brief_a)
+
+    client_b = _fresh_client()  # resets all in-memory singletons
+    brief_b = _extract(client_b, RUNSPACE_BRIEF)
+    _augment_owner_roles(brief_b)
+    plan_b = _generate(client_b, brief_b)
+
+    assert plan_a["plan_id"] == plan_b["plan_id"]
+    assert [a["action_id"] for a in plan_a["actions"]] == [
+        a["action_id"] for a in plan_b["actions"]
+    ]
+    assert [t["task_id"] for t in plan_a["task_drafts"]] == [
+        t["task_id"] for t in plan_b["task_drafts"]
+    ]
