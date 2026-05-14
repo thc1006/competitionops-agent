@@ -365,6 +365,28 @@ ImportError-when-missing path; 3 additional integration tests behind
 ``pytest.importorskip("docling")`` exercise the real engine after
 ``uv sync --extra ocr``.
 
+**Round-2 H1 + H2 (2026-05-15) closed** — round-2 deep review flagged
+two related issues in the Docling adoption path. **H1**: the
+``async def extract_brief_from_pdf`` handler called
+``extractor.extract_from_pdf(contents)`` directly. ``pdf_port.extract``
+is sync; with ``PDF_ADAPTER=docling`` it runs 10-60s of ML inference
+on a real PDF — blocking the worker's event loop for that duration,
+which (combined with prod's H2 ``replicas: 1`` pin) is a cluster-wide
+stall. Fix: wrap the call in ``fastapi.concurrency.run_in_threadpool``.
+**H2**: ``DoclingPdfAdapter.extract`` bound ``tmp_path = Path(handle.name)``
+AFTER ``handle.write(pdf_bytes)`` inside the ``with NamedTemporaryFile``
+block. An OSError on write (disk full / quota) propagated past the
+assignment, leaving ``tmp_path`` unbound and bypassing the outer
+``try/finally`` cleanup — orphan ``.pdf`` files accumulated under
+``$TMPDIR``. Fix: capture ``tmp_path`` first, move ``write_bytes`` into
+the ``try`` body. 4 new tests: behavioural event-loop probe (stub
+adapter checks ``asyncio.get_running_loop()`` raises iff offloaded),
+AST structural guard that the handler invokes ``run_in_threadpool``,
+AST ordering guard that ``tmp_path`` binds before any failable op in
+``DoclingPdfAdapter.extract``, AST guard that the cleanup ``unlink``
+lives inside a ``finally:`` block. The AST tests don't import
+docling so they run on every CI without ``--extra ocr``.
+
 **M5 (2026-05-14) closed** — PDF upload handler now reads the body in
 1 MiB chunks and raises 413 the moment accumulated bytes overshoot
 the 10 MiB cap. Before this fix, ``contents = await file.read()`` with
