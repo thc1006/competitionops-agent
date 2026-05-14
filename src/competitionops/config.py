@@ -116,6 +116,11 @@ class Settings(BaseSettings):
     # the Drive base so an invalid value crashes at Settings
     # construction, not at the first ``documents.create``.
     google_docs_api_base: str = "https://docs.googleapis.com"
+    # P1-002 — Google Sheets API base. Same gate semantics as Drive +
+    # Docs (bearer-only ``real_mode``; this field is configuration,
+    # not a gate — see issue-1 AST guard in tests). Default targets
+    # the prod Sheets v4 endpoint.
+    google_sheets_api_base: str = "https://sheets.googleapis.com"
 
     plane_base_url: str | None = None
     plane_api_key: SecretStr | None = None
@@ -151,6 +156,13 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_docs_api_base(cls, v: str) -> str:
         result = _validate_http_url(v, field_name="google_docs_api_base")
+        assert result is not None  # for mypy — required field, never None
+        return result
+
+    @field_validator("google_sheets_api_base")
+    @classmethod
+    def _validate_sheets_api_base(cls, v: str) -> str:
+        result = _validate_http_url(v, field_name="google_sheets_api_base")
         assert result is not None  # for mypy — required field, never None
         return result
 

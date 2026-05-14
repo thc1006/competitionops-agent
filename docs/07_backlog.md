@@ -130,16 +130,51 @@ so the suite stays offline.
 
 ### P1-002 — Google Sheets real adapter
 
-When this lands, follow the **bearer-only** ``real_mode`` pattern that
-Drive (P1-005) and Docs (P1-001) settled on after issue-1 cleanup —
-i.e. ``return bool(self.settings.google_oauth_access_token)`` only.
-Do NOT AND in ``bool(self.settings.google_sheets_api_base)``: when the
-base field has a non-empty prod-URL default + the standard URL
-validator, the second clause is always True at runtime (dead code that
-misleads future readers). The structural guard
-``test_real_mode_property_does_not_reference_api_base_attribute`` in
-``tests/test_google_workspace_adapters.py`` already enforces this for
-Drive + Docs; extend that tuple when Sheets graduates to real mode.
+Status: **Done (2026-05-15)** — Sheets adapter upgraded from Sprint-0
+stateful mock to mock-first + real-mode httpx-backed REST. Bearer-only
+``real_mode`` (issue-1 pattern); ``google_sheets_api_base`` defaults to
+the prod Sheets URL and is configuration, not a gate. The structural
+AST guard in ``tests/test_google_workspace_adapters.py`` was extended
+to cover sheets_mod alongside drive_mod + docs_mod.
+
+Real-mode operations:
+- ``google.sheets.append_tracking_row`` / ``google.sheets.append_rows`` →
+  ``POST /v4/spreadsheets/{id}/values/{range}:append`` with
+  ``valueInputOption=USER_ENTERED`` query param. Body is
+  ``{"values": [[...]]}`` — 2D array, each inner list is a row. Row
+  dicts are serialised by ``dict.values()`` in insertion order; v1
+  assumes rows share keys (the planner emits this naturally). Default
+  range when payload omits one: ``Sheet1``.
+- ``google.sheets.update_cells`` →
+  ``POST /v4/spreadsheets/{id}/values:batchUpdate``. Body is
+  ``{"valueInputOption": "USER_ENTERED", "data": [{"range": "A1",
+  "values": [["v"]]}, …]}`` — each cell is its own data entry with a
+  1x1 values array.
+
+Safety properties follow Plane / Drive / Docs:
+- Deep-review C1 — dry_run short-circuits BEFORE any HTTP call,
+  returns ``dry_run_<sha1(sheet_id)[:8]>`` synthetic preview. Fallback
+  to action_id when sheet_id is missing (issue-5 pattern).
+- M8 + round-3 M4 — HTTPStatusError → ``safe_error_summary``;
+  HTTPError + InvalidURL → ``safe_network_summary``. Row values and
+  cell contents carry user content; leaking ``str(exc)`` would
+  re-introduce M8 / M4.
+- Stage-4 httpx guard exempts sheets_mod (alongside drive_mod +
+  docs_mod). Calendar remains pure mock until P1-003.
+
+Out of scope (deferred follow-ups):
+- Idempotency. Sheets has no native dedup for append; re-running
+  produces duplicate rows. Operators wire dedup at the orchestrator
+  level (e.g. write action_id into a hidden column + check before
+  append).
+- Column-key inference across heterogeneous row dicts (v1 assumes
+  uniform key order).
+- OAuth refresh, 429 backoff / retry.
+
+Tests: 13 new in ``tests/test_sheets_real_adapter.py`` — real_mode
+toggle (3), append endpoint + body + range + dry_run (4), update_cells
+endpoint + body shape + dry_run (3), 401 / network / InvalidURL
+redaction (3). All offline via ``httpx.MockTransport``.
 
 ### P1-003 — Google Calendar real adapter
 
