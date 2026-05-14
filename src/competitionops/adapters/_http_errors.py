@@ -71,6 +71,36 @@ def safe_error_summary(
     return summary[:_SUMMARY_MAX_CHARS]
 
 
+def safe_network_summary(
+    exc: httpx.HTTPError, *, target: str | None = None
+) -> str:
+    """Audit-safe summary of an ``httpx.HTTPError`` that is NOT a
+    ``HTTPStatusError`` (e.g. ``ConnectError``, ``ReadTimeout``,
+    ``WriteError``, ``RemoteProtocolError``).
+
+    Returns ``"{target} network error: {ExceptionClassName}"`` and
+    DELIBERATELY drops ``str(exc)``. Round-2 M8 — httpx's exception
+    ``__str__`` typically embeds the request URL, and adapter URLs
+    embed user-controlled query strings: Drive's
+    ``q=name='<folder_name>'`` and Plane's ``search=<issue_title>``.
+    A folder name or issue title that happened to contain a token-
+    like substring (copy-pasted credential, secret label) would leak
+    into the audit log via that branch.
+
+    Args:
+        exc: The httpx exception caught at the adapter boundary.
+        target: Optional adapter label (e.g. ``"plane"`` / ``"drive"``)
+            prepended so audit consumers can tell which integration
+            produced the failure.
+
+    Returns:
+        A short, redacted string. Class names are bounded so the
+        output is naturally short — no explicit length cap needed.
+    """
+    prefix = f"{target} " if target else ""
+    return f"{prefix}network error: {type(exc).__name__}"
+
+
 def _extract_structured_message(response: httpx.Response) -> str | None:
     """Return the first string-valued ``error`` / ``detail`` / ``message``
     field in a JSON dict body, or None for anything else.
