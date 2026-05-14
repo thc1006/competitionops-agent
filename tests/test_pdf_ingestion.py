@@ -163,3 +163,140 @@ def test_api_pdf_upload_does_not_pollute_text_endpoint() -> None:
         json={"source_type": "text", "content": ""},
     )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# M5 — chunked read defense against OOM via oversized upload
+#
+# Background: the original Sprint 0-2 implementation did
+# ``contents = await file.read()`` with no chunk size, then checked the
+# 10 MiB limit on the returned bytes. A client posting a Content-Length:
+# 10GB upload would force the handler to allocate a 10 GiB Python
+# ``bytes`` object BEFORE the 413 check could fire — OOM-killing the pod
+# even though the request was clearly oversized. (Starlette
+# ``SpooledTemporaryFile`` spills the body to disk past 1 MiB, but
+# ``read()`` with no argument materialises the whole thing back into
+# RAM.)
+#
+# The fix reads in fixed-size chunks and refuses with 413 the moment
+# accumulated bytes exceed the limit, so the largest in-process
+# allocation is bounded by ``limit + chunk_size``.
+# ---------------------------------------------------------------------------
+
+
+def test_pdf_upload_handler_reads_in_bounded_chunks_not_unbounded() -> None:
+    """M5 regression guard. Spy on ``UploadFile.read`` to verify the
+    handler never calls it without a positive size argument. An
+    unbounded read is what created the OOM window in the first place."""
+    # Patch the base ``starlette.datastructures.UploadFile`` so spies
+    # fire whether FastAPI hands us a starlette instance or its own
+    # subclass. (The two are distinct classes at runtime; patching the
+    # fastapi subclass alone misses reads on starlette-created
+    # instances that flow through the parser.)
+    from starlette.datastructures import UploadFile as _UploadFile
+
+    sizes_seen: list[int | None] = []
+    original_read = _UploadFile.read
+
+    async def spy(self: _UploadFile, size: int = -1) -> bytes:
+        sizes_seen.append(size)
+        return await original_read(self, size)
+
+    _UploadFile.read = spy  # type: ignore[method-assign]
+    try:
+        client = _fresh_client()
+        response = client.post(
+            "/briefs/extract/pdf",
+            files={"file": ("ok.pdf", _FAKE_PDF, "application/pdf")},
+        )
+    finally:
+        _UploadFile.read = original_read  # type: ignore[method-assign]
+
+    assert response.status_code == 200, response.text
+    assert sizes_seen, "handler must read the upload at least once"
+    unbounded = [s for s in sizes_seen if s is None or s < 0]
+    assert not unbounded, (
+        f"handler called UploadFile.read with unbounded size {unbounded!r}; "
+        "M5 requires chunked reads so an oversized upload cannot allocate "
+        "an unbounded bytes object before the 413 check fires."
+    )
+
+
+def test_pdf_upload_short_circuits_oversized_payload_within_a_chunk_of_the_limit() -> None:
+    """M5 regression guard — bytes-read budget.
+
+    For an oversized payload, the handler must stop reading shortly
+    after crossing the 10 MiB limit. With a 1 MiB chunk size the worst
+    case is ``limit + chunk_size = 11 MiB``. We send a body just one
+    byte past the limit and verify the cumulative read budget stays
+    inside that window. A regressed implementation that buffers
+    everything via ``await file.read()`` would read the full body in
+    one unbounded call (10 MiB + 1 bytes), exceeding the bound by far.
+    """
+    from starlette.datastructures import UploadFile as _UploadFile
+
+    bytes_read_total = 0
+    sizes_seen: list[int] = []
+    original_read = _UploadFile.read
+
+    async def spy(self: _UploadFile, size: int = -1) -> bytes:
+        nonlocal bytes_read_total
+        sizes_seen.append(size)
+        data = await original_read(self, size)
+        bytes_read_total += len(data)
+        return data
+
+    # 15 MiB — well past the 10 MiB cap. Picking a payload comfortably
+    # bigger than (limit + a generous chunk-size allowance) is what lets
+    # this test distinguish a buggy unbounded read (which would read
+    # all 15 MiB) from a chunked early-exit (which stops at ~11 MiB).
+    payload = b"%PDF-1.4\n" + (b"x" * (15 * 1024 * 1024 - 9))
+    assert len(payload) == 15 * 1024 * 1024
+
+    _UploadFile.read = spy  # type: ignore[method-assign]
+    try:
+        client = _fresh_client()
+        response = client.post(
+            "/briefs/extract/pdf",
+            files={"file": ("big.pdf", payload, "application/pdf")},
+        )
+    finally:
+        _UploadFile.read = original_read  # type: ignore[method-assign]
+
+    assert response.status_code == 413, response.text
+    # Bound = limit + 2 MiB allowance for chunk overshoot. The fixed
+    # implementation (1 MiB chunk) reads ~11 MiB before refusing. The
+    # buggy unbounded implementation reads the full 15 MiB and trips
+    # the assertion below.
+    upper_bound = 10 * 1024 * 1024 + 2 * 1024 * 1024
+    assert bytes_read_total <= upper_bound, (
+        f"handler read {bytes_read_total} bytes for a 15 MiB payload; "
+        f"M5 requires bounded reads (~limit + one chunk = "
+        f"<= {upper_bound} bytes). Largest chunk requested: "
+        f"max(sizes_seen)={max(sizes_seen) if sizes_seen else 0}."
+    )
+    # And: refusing past the limit should require more than one read
+    # call. A single read of the entire body is exactly the bug.
+    assert len(sizes_seen) > 1, (
+        f"handler only invoked read() {len(sizes_seen)} time(s); M5 "
+        "expects multiple chunked reads before refusing."
+    )
+
+
+def test_pdf_upload_handler_source_does_not_call_unbounded_read() -> None:
+    """Structural guard against silent reversion: grep the handler
+    source for ``file.read()`` with no args. Cheap and deterministic —
+    fires the moment someone restores the original one-liner."""
+    import inspect
+    import re
+
+    from competitionops import main as main_module
+
+    source = inspect.getsource(main_module.extract_brief_from_pdf)
+    forbidden = re.search(r"\bfile\.read\(\s*\)", source)
+    assert forbidden is None, (
+        "M5 regression — the PDF upload handler calls ``file.read()`` "
+        "with no size argument, which buffers the entire upload before "
+        "the 413 check can run. Use a chunked loop with an explicit "
+        "chunk size instead."
+    )
