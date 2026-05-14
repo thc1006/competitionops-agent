@@ -29,21 +29,12 @@ from pathlib import Path
 
 import pytest
 
-from competitionops import config as config_module
 
-
-@pytest.fixture(autouse=True)
-def _isolate_settings_cache_per_test():
-    """``runtime`` factories cache on first call. If a previous test
-    set ``PLAN_REPO_DIR`` / ``AUDIT_LOG_DIR`` env, those would leak
-    into this file's assertions. Clear caches at teardown."""
-    yield
-    config_module.get_settings.cache_clear()
-    from competitionops import runtime
-
-    runtime._plan_repo.cache_clear()
-    runtime._audit_log.cache_clear()
-    runtime._registry.cache_clear()
+# Round-2 M6 — per-test teardown lives in ``tests/conftest.py`` as an
+# autouse fixture covering all five runtime singletons. This file's
+# tests that need a mid-body reset import the helper directly from
+# conftest (pytest adds the conftest's directory to sys.path).
+from conftest import reset_runtime_caches  # noqa: E402, I001
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +59,10 @@ def test_runtime_plan_repo_factory_returns_in_memory_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PLAN_REPO_DIR", raising=False)
-    config_module.get_settings.cache_clear()
+    reset_runtime_caches()
     from competitionops import runtime
     from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 
-    runtime._plan_repo.cache_clear()
     repo = runtime._plan_repo()
     assert isinstance(repo, InMemoryPlanRepository)
 
@@ -81,11 +71,10 @@ def test_runtime_plan_repo_factory_returns_file_backed_when_dir_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PLAN_REPO_DIR", str(tmp_path))
-    config_module.get_settings.cache_clear()
+    reset_runtime_caches()
     from competitionops import runtime
     from competitionops.adapters.file_plan_store import FilePlanRepository
 
-    runtime._plan_repo.cache_clear()
     repo = runtime._plan_repo()
     assert isinstance(repo, FilePlanRepository)
     assert repo.base_dir == tmp_path
@@ -95,11 +84,10 @@ def test_runtime_audit_log_factory_returns_in_memory_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("AUDIT_LOG_DIR", raising=False)
-    config_module.get_settings.cache_clear()
+    reset_runtime_caches()
     from competitionops import runtime
     from competitionops.adapters.memory_audit import InMemoryAuditLog
 
-    runtime._audit_log.cache_clear()
     log = runtime._audit_log()
     assert isinstance(log, InMemoryAuditLog)
 
@@ -108,11 +96,10 @@ def test_runtime_audit_log_factory_returns_file_backed_when_dir_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUDIT_LOG_DIR", str(tmp_path))
-    config_module.get_settings.cache_clear()
+    reset_runtime_caches()
     from competitionops import runtime
     from competitionops.adapters.file_audit import FileAuditLog
 
-    runtime._audit_log.cache_clear()
     log = runtime._audit_log()
     assert isinstance(log, FileAuditLog)
     assert log.base_dir == tmp_path

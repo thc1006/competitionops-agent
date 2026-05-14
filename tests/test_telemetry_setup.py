@@ -53,22 +53,15 @@ def test_setup_idempotent() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def _isolated_meter_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pretend no MeterProvider is installed yet. We can't actually
-    uninstall a global MeterProvider (OTel forbids it) so we patch the
-    accessor to report the noop default during this test only."""
-    from opentelemetry.metrics._internal import _ProxyMeterProvider
-
-    proxy = _ProxyMeterProvider()
-    monkeypatch.setattr(metrics, "get_meter_provider", lambda: proxy)
-    monkeypatch.setattr(metrics, "set_meter_provider", lambda _provider: None)
+# M1 isolation note — round-2 PR C lifted the ``_isolated_meter_provider``
+# fixture into ``tests/conftest.py`` as the shared ``isolated_meter_provider``
+# (sans leading underscore) so both this file and ``test_otel_wiring.py``
+# request it by the same name. The autouse part of conftest still resets
+# runtime caches; this opt-in fixture is for OTel state specifically.
 
 
 def test_setup_meter_provider_installs_readers_on_first_call(
-    _isolated_meter_provider: None,
+    isolated_meter_provider: None,
 ) -> None:
     """Happy path: when no SDK MeterProvider exists yet,
     ``setup_meter_provider`` installs one with the requested readers."""

@@ -20,23 +20,16 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from competitionops import config as config_module
 from competitionops import main as main_module
 from competitionops.adapters.file_plan_store import FilePlanRepository
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 
-
-def _reset_all_caches() -> None:
-    config_module.get_settings.cache_clear()
-    main_module._plan_repo.cache_clear()
-    main_module._audit_log.cache_clear()
-    main_module._registry.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolate_settings_cache_per_test():
-    yield
-    _reset_all_caches()
+# Round-2 M6 — the per-test cache teardown lives in ``tests/conftest.py``
+# as an autouse fixture (so future runtime singletons are reset
+# everywhere by default). Tests that need to clear caches mid-body
+# import the helper from conftest (pytest adds the conftest's directory
+# to sys.path automatically).
+from conftest import reset_runtime_caches as _reset_all_caches  # noqa: E402, I001
 
 
 def test_plan_repo_factory_returns_in_memory_when_dir_unset(

@@ -29,23 +29,12 @@ from competitionops import main as main_module
 from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.ports import PdfIngestionPort
 
+# Round-2 M6 — runtime-cache reset lives in ``tests/conftest.py``
+# (autouse for every test + helper for mid-body calls). Local alias
+# keeps the existing call sites readable.
+from conftest import reset_runtime_caches as _reset_runtime  # noqa: E402, I001
+
 _FAKE_PDF = b"%PDF-1.4\nRunSpace Challenge\nSubmission deadline: 2026-09-30\n"
-
-
-def _reset_runtime() -> None:
-    config_module.get_settings.cache_clear()
-    from competitionops import runtime
-
-    runtime._plan_repo.cache_clear()
-    runtime._audit_log.cache_clear()
-    runtime._registry.cache_clear()
-    runtime._pdf_adapter.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolate_runtime_caches() -> Any:
-    yield
-    _reset_runtime()
 
 
 # ---------------------------------------------------------------------------
