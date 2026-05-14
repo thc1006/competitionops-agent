@@ -435,6 +435,26 @@ references the audit subdir), 2 Dockerfile structural guards
 2 README content guards (H2 checklist references configmap +
 INCLUDE_OCR pair).
 
+**Round-2 M5 (2026-05-15) closed** — round-1 M3 added
+``Annotated[list[...], operator.add]`` to the five accumulative
+state fields; round-2 review pointed out a paired hazard: the
+``execute_node`` and ``audit_node`` bodies both return FULL
+SNAPSHOTS of upstream stores (``ExecutionService.approve_and_execute``
+response and ``audit_log.list_for_plan(plan_id)`` respectively).
+The linear graph runs each node once so the reducer is harmless;
+a future ``Send``-based fan-out where parallel sub-tasks re-query
+the same store would have every sub-task emit the same snapshot
+and ``operator.add`` would N-tuple the data. The fix is
+documentation, NOT a premature node restructure (fan-out hasn't
+been designed yet, and weakening the reducer would defeat round-1
+M3). ``workflows/state.py`` module docstring grew a "snapshot-vs-
+delta invariant" section spelling out the failure mode by name;
+``execute_node`` and ``audit_node`` docstrings cross-reference it
+with concrete "do NOT just wrap this body in Send" guidance. 3
+new tests assert each docstring contains both ``snapshot`` and a
+``fan-out`` / ``Send`` reference, so the warning can't be
+silently removed by a refactor.
+
 **M5 (2026-05-14) closed** — PDF upload handler now reads the body in
 1 MiB chunks and raises 413 the moment accumulated bytes overshoot
 the 10 MiB cap. Before this fix, ``contents = await file.read()`` with

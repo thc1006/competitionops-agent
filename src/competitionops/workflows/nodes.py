@@ -87,7 +87,20 @@ def approve_node(state: CompetitionOpsState) -> dict[str, Any]:
 
 
 async def execute_node(state: CompetitionOpsState) -> dict[str, Any]:
-    """Run ``ExecutionService.approve_and_execute`` over the approved ids."""
+    """Run ``ExecutionService.approve_and_execute`` over the approved ids.
+
+    Round-2 M5 caveat — this node returns a full SNAPSHOT of the
+    response (``executed`` / ``skipped`` / ``failed`` / ``blocked``
+    are the complete lists from one ``approve_and_execute`` call).
+    The state schema's ``operator.add`` reducer is correct for the
+    linear graph (one writer = one snapshot = identity merge), but
+    future ``Send``-based fan-out must NOT wrap THIS body — that
+    would have each sub-task re-emit the same global snapshot and
+    the reducer would N-tuple the data. Restructure to emit per-
+    task deltas (one-element lists with this sub-task's result)
+    BEFORE adding fan-out. See ``workflows/state.py`` module
+    docstring for the snapshot-vs-delta invariant.
+    """
     plan_dict = state.get("plan")
     if not plan_dict:
         return {
@@ -125,7 +138,17 @@ async def execute_node(state: CompetitionOpsState) -> dict[str, Any]:
 
 
 def audit_node(state: CompetitionOpsState) -> dict[str, Any]:
-    """Snapshot all audit records for the plan into the final state."""
+    """Snapshot all audit records for the plan into the final state.
+
+    Round-2 M5 caveat — like ``execute_node``, this returns the full
+    SNAPSHOT (``audit_log.list_for_plan(plan_id)``). Linear graph is
+    safe; future ``Send`` fan-out is NOT. A per-record audit pipeline
+    that just wraps this body in ``Send`` would have every parallel
+    sub-task re-query the audit log and emit the same global list →
+    ``operator.add`` would N-tuple it. Fan-out authors must
+    restructure the node to return per-sub-task deltas first. See
+    ``workflows/state.py`` snapshot-vs-delta invariant.
+    """
     plan_dict = state.get("plan")
     if not plan_dict:
         return {"audit_records": []}

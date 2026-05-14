@@ -414,3 +414,93 @@ def test_executed_field_accumulates_across_parallel_writers() -> None:
         f"M3: parallel writers via Send must accumulate via the "
         f"operator.add reducer. Got executed={result.get('executed')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-2 M5 — snapshot-vs-delta invariant for execute / audit nodes.
+#
+# M3 (round-1) added ``Annotated[list[...], operator.add]`` to the
+# five accumulative fields. Round-2 review pointed out an uncovered
+# gap: the current ``execute_node`` and ``audit_node`` return FULL
+# snapshots of their respective stores (the whole
+# ``ExecutionService.approve_and_execute`` response, or
+# ``audit_log.list_for_plan(plan_id)`` end-to-end). On the current
+# linear graph that's harmless — each node runs exactly once. On a
+# future ``Send``-based fan-out where multiple parallel sub-tasks
+# call the same audit log / execution service, every sub-task would
+# return the same full snapshot and ``operator.add`` would
+# concatenate them — double-counting.
+#
+# The fix is documentation: the actual fan-out hasn't been designed
+# yet, so prematurely rewriting the nodes would over-engineer for an
+# unknown contract. State schema + each node docstring must call out
+# the snapshot-vs-delta caveat so the next author adding fan-out
+# sees the invariant they need to preserve.
+# ---------------------------------------------------------------------------
+
+
+def test_state_docstring_documents_snapshot_vs_delta_invariant() -> None:
+    """Round-2 M5 — ``state.py`` module docstring must concretely
+    explain that ``operator.add`` only works correctly if each writer
+    emits its own DELTA (per-task element), not a shared full
+    SNAPSHOT. Otherwise a future Send fan-out doubles up. The test
+    requires BOTH terms + an explicit fan-out / Send reference so a
+    passing hint can't be a single accidental word match."""
+    import inspect
+
+    from competitionops.workflows import state
+
+    module_doc = inspect.getdoc(state) or ""
+    lower = module_doc.lower()
+    assert "snapshot" in lower, (
+        "state.py docstring must name the ``snapshot`` term so the "
+        "snapshot-vs-delta hazard is grep-able."
+    )
+    assert "delta" in lower, (
+        "state.py docstring must name the ``delta`` term so the "
+        "snapshot-vs-delta hazard is grep-able."
+    )
+    # Concrete failure mode named.
+    assert "fan-out" in lower or "Send" in module_doc, (
+        "state.py docstring must call out the ``Send`` / fan-out "
+        "failure mode by name."
+    )
+
+
+def test_execute_node_docstring_warns_full_snapshot_caveat() -> None:
+    """The execute node returns the FULL response, so future fan-out
+    must restructure it (NOT just slap ``Send`` calls around the
+    existing body)."""
+    import inspect
+
+    from competitionops.workflows.nodes import execute_node
+
+    doc = inspect.getdoc(execute_node) or ""
+    lower = doc.lower()
+    assert "snapshot" in lower, (
+        "``execute_node`` docstring must say it returns a full "
+        "snapshot, so future fan-out authors recognise the M5 hazard."
+    )
+    assert "fan-out" in lower or "Send" in doc, (
+        "``execute_node`` docstring must reference the fan-out / Send "
+        "scenario where the snapshot-vs-delta mismatch breaks."
+    )
+
+
+def test_audit_node_docstring_warns_full_snapshot_caveat() -> None:
+    """Same warning for the audit node, which returns the WHOLE
+    ``list_for_plan(plan_id)`` result."""
+    import inspect
+
+    from competitionops.workflows.nodes import audit_node
+
+    doc = inspect.getdoc(audit_node) or ""
+    lower = doc.lower()
+    assert "snapshot" in lower, (
+        "``audit_node`` docstring must name ``snapshot`` to flag the "
+        "M5 hazard."
+    )
+    assert "fan-out" in lower or "Send" in doc, (
+        "``audit_node`` docstring must reference the fan-out / Send "
+        "scenario."
+    )
