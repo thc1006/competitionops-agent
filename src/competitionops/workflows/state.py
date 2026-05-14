@@ -25,6 +25,31 @@ this schema.
 Single-writer fields stay unannotated on purpose: adding a reducer
 to ``brief``/``plan``/etc would cause duplicates to accumulate on
 graph replay, which is nonsense for those fields.
+
+Snapshot-vs-delta invariant (round-2 M5):
+
+The ``operator.add`` reducer ONLY behaves correctly when each
+writer emits its own DELTA (the new elements produced BY THIS
+writer), not a SNAPSHOT (the full current contents of the
+upstream store). Today the linear graph runs ``execute_node`` and
+``audit_node`` exactly once per invocation, so both are free to
+return full snapshots — ``approve_and_execute`` gives the whole
+response, ``list_for_plan`` gives every audit record — and the
+reducer trivially collapses to "one writer, identity merge".
+
+The hazard is the FIRST time someone adds a ``Send``-based fan-out
+(e.g. one parallel sub-task per action). Each sub-task naturally
+re-queries the audit log / execution service and gets back the
+SAME full snapshot. The reducer then concatenates N copies of the
+same data → double / triple / N-tuple counting. The fix is NOT
+to weaken the reducer (correct for true deltas), it is to
+restructure the producer node so each sub-task returns only its
+own delta (e.g. a single-element list with the result of ITS
+action, never the global list).
+
+Future fan-out authors: do NOT just wrap the existing node body
+in ``Send`` and call it done. The node must be refactored to
+return per-task deltas first, then the fan-out works.
 """
 
 from __future__ import annotations
