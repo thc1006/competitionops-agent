@@ -71,16 +71,24 @@ class DoclingPdfAdapter:
         ``BriefExtractor`` can selectively ignore but the future
         LLM-prompted extractor (Sprint 5+) will actually use.
         """
-        # ``NamedTemporaryFile(delete=False)`` because Docling opens the
-        # file by path internally and the GC closing our handle while
-        # Docling reads would crash on some platforms. We explicitly
-        # ``unlink`` in the ``finally`` instead.
+        # Round-2 H2 — capture ``tmp_path`` BEFORE any failable op so the
+        # outer ``try/finally`` always runs. The previous shape did
+        # ``handle.write(pdf_bytes); tmp_path = Path(handle.name)`` inside
+        # the ``with`` block; an OSError on write (disk full / quota)
+        # propagated past the assignment, so ``tmp_path`` was never bound
+        # and the outer finally never reached — orphan ``.pdf`` files
+        # accumulated under ``$TMPDIR``.
+        #
+        # ``NamedTemporaryFile(delete=False)`` so Docling can open the
+        # file by path after we've closed our handle; the GC closing our
+        # handle while Docling reads has crashed on some platforms. The
+        # explicit ``unlink`` in the ``finally`` is our cleanup.
         with tempfile.NamedTemporaryFile(
             suffix=".pdf", delete=False
         ) as handle:
-            handle.write(pdf_bytes)
             tmp_path = Path(handle.name)
         try:
+            tmp_path.write_bytes(pdf_bytes)
             result = self._converter.convert(tmp_path)
             # Docling has no published type stubs; cast to str so mypy
             # doesn't complain about returning Any from this method.

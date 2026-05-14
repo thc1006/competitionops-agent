@@ -313,3 +313,218 @@ def test_docling_adapter_extract_returns_text_from_real_pdf() -> None:
     text = DoclingPdfAdapter().extract(pdf_bytes)
     assert "RunSpace" in text
     assert "2026-09-30" in text
+
+
+# ---------------------------------------------------------------------------
+# Round 2 deep review — H1: ``pdf_port.extract`` must NOT block the
+# FastAPI event loop. Real Docling inference is 10-60s on a single PDF;
+# H2 still pins prod to ``replicas=1``, so a single blocked worker
+# means cluster-wide stall. The fix wraps the call in
+# ``run_in_threadpool`` (FastAPI's standard offload primitive).
+#
+# The probe stub below distinguishes "ran on the event loop" from "ran
+# on a worker thread" by checking whether ``asyncio.get_running_loop()``
+# raises — it does in a non-event-loop thread, and returns the loop on
+# the event loop. Deterministic, no timing dependency.
+# ---------------------------------------------------------------------------
+
+
+def test_pdf_endpoint_runs_extract_off_event_loop() -> None:
+    """H1 regression guard: the FastAPI handler must offload
+    ``pdf_port.extract`` so heavy sync engines (Docling) don't block
+    every concurrent request on the worker."""
+    import asyncio
+
+    class _LoopProbeAdapter:
+        def __init__(self) -> None:
+            self.was_offloaded: bool | None = None
+
+        def extract(self, pdf_bytes: bytes) -> str:
+            try:
+                asyncio.get_running_loop()
+                # Running loop accessible → we're on the event loop (BAD).
+                self.was_offloaded = False
+            except RuntimeError:
+                # No running loop → we're on a worker thread (GOOD).
+                self.was_offloaded = True
+            return "Probe Cup\nSubmission deadline: 2026-09-30\n"
+
+    probe = _LoopProbeAdapter()
+    main_module.app.dependency_overrides[main_module.get_pdf_adapter] = (
+        lambda: probe
+    )
+    try:
+        _reset_runtime()
+        client = TestClient(main_module.app)
+        response = client.post(
+            "/briefs/extract/pdf",
+            files={
+                "file": (
+                    "probe.pdf",
+                    b"%PDF-1.4\nProbe Cup\nSubmission deadline: 2026-09-30\n",
+                    "application/pdf",
+                ),
+            },
+        )
+    finally:
+        main_module.app.dependency_overrides.pop(
+            main_module.get_pdf_adapter, None
+        )
+
+    assert response.status_code == 200, response.text
+    assert probe.was_offloaded is True, (
+        "H1 regression: ``pdf_port.extract`` ran on the FastAPI worker's "
+        "event loop. Heavy sync engines (real Docling = 10-60s) block "
+        "every other request on this worker. Wrap the call in "
+        "``fastapi.concurrency.run_in_threadpool`` (or "
+        "``anyio.to_thread.run_sync``)."
+    )
+
+
+def test_pdf_endpoint_handler_invokes_run_in_threadpool() -> None:
+    """Structural guard: the handler source must contain a call to
+    ``run_in_threadpool``. Belt-and-braces with the behavioural test
+    above — guarantees a clean diff signal if the offload disappears.
+    AST walk so a comment that names the function doesn't false-positive."""
+    import ast
+    import inspect
+
+    source = inspect.getsource(main_module.extract_brief_from_pdf)
+    tree = ast.parse(source)
+    threadpool_calls: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "run_in_threadpool":
+            threadpool_calls.append(ast.unparse(node))
+        elif (
+            isinstance(func, ast.Attribute) and func.attr == "run_in_threadpool"
+        ):
+            threadpool_calls.append(ast.unparse(node))
+
+    assert threadpool_calls, (
+        "H1: ``extract_brief_from_pdf`` must call ``run_in_threadpool`` "
+        "to offload the sync extractor."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round 2 deep review — H2: ``DoclingPdfAdapter.extract`` previously
+# assigned ``tmp_path = Path(handle.name)`` AFTER ``handle.write(...)``.
+# If write raised (disk full / quota), ``tmp_path`` was never bound AND
+# the outer ``try/finally`` never ran — orphan ``.pdf`` files
+# accumulated under ``$TMPDIR``.
+#
+# Tested via AST so docling does NOT need to be installed.
+# ---------------------------------------------------------------------------
+
+
+def test_pdf_docling_extract_captures_tmp_path_before_failable_ops() -> None:
+    """H2 structural regression guard. Walks ``pdf_docling.py`` source
+    via AST (no docling import) and asserts the line that binds
+    ``tmp_path`` precedes any ``.write`` / ``.write_bytes`` / ``.convert``
+    call inside ``extract``. A regression would put the bind line after
+    a failable op, leaking tempfiles."""
+    import ast
+    from pathlib import Path as _Path
+
+    src_path = (
+        _Path(__file__).resolve().parents[1]
+        / "src"
+        / "competitionops"
+        / "adapters"
+        / "pdf_docling.py"
+    )
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+    extract_method: ast.FunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "extract":
+            extract_method = node
+            break
+    assert extract_method is not None, "extract method not found in pdf_docling.py"
+
+    tmp_path_bind_line: int | None = None
+    first_failable_op_line: int | None = None
+    for node in ast.walk(extract_method):
+        # Find: tmp_path = ...
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "tmp_path":
+                    if (
+                        tmp_path_bind_line is None
+                        or node.lineno < tmp_path_bind_line
+                    ):
+                        tmp_path_bind_line = node.lineno
+        # Find first call to .write / .write_bytes / .convert
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in ("write", "write_bytes", "convert"):
+                if (
+                    first_failable_op_line is None
+                    or node.lineno < first_failable_op_line
+                ):
+                    first_failable_op_line = node.lineno
+
+    assert tmp_path_bind_line is not None, (
+        "extract method must bind a local named ``tmp_path`` — the H2 "
+        "fix anchors cleanup on this variable."
+    )
+    assert first_failable_op_line is not None, (
+        "extract method should contain a failable file / engine call "
+        "(write / write_bytes / convert)."
+    )
+    assert tmp_path_bind_line <= first_failable_op_line, (
+        f"H2 regression: ``tmp_path`` bound at line {tmp_path_bind_line} "
+        f"AFTER first failable op at line {first_failable_op_line}. "
+        "If that op raises before tmp_path is captured, the outer "
+        "``try/finally`` never runs and the tempfile leaks."
+    )
+
+
+def test_pdf_docling_extract_unlinks_tempfile_in_finally() -> None:
+    """H2 structural — cleanup must live inside a ``finally:`` block so
+    it runs on any in-try exception. Belt-and-braces with the ordering
+    test above."""
+    import ast
+    from pathlib import Path as _Path
+
+    src_path = (
+        _Path(__file__).resolve().parents[1]
+        / "src"
+        / "competitionops"
+        / "adapters"
+        / "pdf_docling.py"
+    )
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+    extract_method: ast.FunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "extract":
+            extract_method = node
+            break
+    assert extract_method is not None
+
+    found_unlink_in_finally = False
+    for try_node in ast.walk(extract_method):
+        if not isinstance(try_node, ast.Try):
+            continue
+        for stmt in try_node.finalbody:
+            for inner in ast.walk(stmt):
+                if not isinstance(inner, ast.Call):
+                    continue
+                func = inner.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "unlink"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "tmp_path"
+                ):
+                    found_unlink_in_finally = True
+                    break
+
+    assert found_unlink_in_finally, (
+        "H2 regression: ``tmp_path.unlink(...)`` not found inside a "
+        "``finally:`` block. Cleanup must be in finally so it runs "
+        "whether the engine succeeds or raises."
+    )

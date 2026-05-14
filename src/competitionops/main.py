@@ -1,6 +1,7 @@
 import os
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from competitionops.adapters.registry import AdapterRegistry
@@ -293,7 +294,17 @@ async def extract_brief_from_pdf(
         )
 
     extractor = BriefExtractor(settings=settings, pdf_port=pdf_port)
-    return extractor.extract_from_pdf(contents)
+    # Round-2 H1 — ``pdf_port.extract`` is sync. With ``PDF_ADAPTER=docling``
+    # it can take 10-60 s of ML inference on a real PDF, which would
+    # block this worker's event loop for that entire duration. H2 still
+    # pins prod to ``replicas: 1``, so a blocked worker is a cluster-wide
+    # stall. ``run_in_threadpool`` offloads to a worker thread; FastAPI
+    # awaits while the thread runs, so other concurrent requests on this
+    # worker keep progressing. The wrap covers the WHOLE
+    # ``BriefExtractor.extract_from_pdf`` call, not just the port call,
+    # because the regex extraction in the service is also (lightly) CPU-
+    # bound and the call site shouldn't peer into the implementation.
+    return await run_in_threadpool(extractor.extract_from_pdf, contents)
 
 
 # ----------------------------------------------------------------------
