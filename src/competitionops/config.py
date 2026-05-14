@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     # not a gate — see issue-1 AST guard in tests). Default targets
     # the prod Sheets v4 endpoint.
     google_sheets_api_base: str = "https://sheets.googleapis.com"
+    # P1-003 — Google Calendar API base. Default is the unified
+    # Google APIs host (same as Drive); Calendar v3 lives under
+    # ``/calendar/v3/...``. Bearer-only ``real_mode`` (issue-1 AST
+    # guard); this field is configuration, not a gate.
+    google_calendar_api_base: str = "https://www.googleapis.com"
 
     plane_base_url: str | None = None
     plane_api_key: SecretStr | None = None
@@ -163,6 +168,13 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_sheets_api_base(cls, v: str) -> str:
         result = _validate_http_url(v, field_name="google_sheets_api_base")
+        assert result is not None  # for mypy — required field, never None
+        return result
+
+    @field_validator("google_calendar_api_base")
+    @classmethod
+    def _validate_calendar_api_base(cls, v: str) -> str:
+        result = _validate_http_url(v, field_name="google_calendar_api_base")
         assert result is not None  # for mypy — required field, never None
         return result
 
