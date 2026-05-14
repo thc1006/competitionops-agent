@@ -18,11 +18,13 @@ from competitionops.telemetry.metrics import (
     audit_records_total,
 )
 from competitionops.telemetry.setup import (
+    OtelInstallOrderError,
     setup_meter_provider,
     setup_tracer_provider,
 )
 
 __all__ = [
+    "OtelInstallOrderError",
     "action_execution_duration_seconds",
     "actions_total",
     "annotate_span",

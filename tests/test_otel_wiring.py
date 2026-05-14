@@ -85,15 +85,42 @@ def test_otel_exporters_enabled_otlp_endpoint_empty_string_still_truthy(
 def test_wire_otel_exporters_console_mode_runs_without_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The console branch must complete cleanly; it attaches a
-    BatchSpanProcessor + ConsoleSpanExporter to the global TracerProvider
-    and a PeriodicExportingMetricReader + ConsoleMetricExporter to the
-    MeterProvider. We don't assert internal SDK state because that's
-    OTel's contract, not ours; we only assert "no crash".
+    """The console branch must complete cleanly when nothing else has
+    pre-installed a MeterProvider. Attaches a BatchSpanProcessor +
+    ConsoleSpanExporter to the global TracerProvider and a
+    PeriodicExportingMetricReader + ConsoleMetricExporter to a fresh
+    MeterProvider.
+
+    M1 — A MeterProvider is once-only at the OTel-SDK level (readers
+    are constructor-only). Other test files in the session may have
+    already installed one (e.g. ``tests/test_metrics.py``'s
+    InMemoryMetricReader fixture). We isolate this test by patching
+    the metrics module so it reports a proxy provider, mirroring the
+    fresh-process state production wiring runs against.
     """
+    # Isolate from any session-scoped MeterProvider another test
+    # already installed — see M1 docstring above for why.
+    from opentelemetry import metrics
+    from opentelemetry.metrics._internal import _ProxyMeterProvider
+
+    proxy = _ProxyMeterProvider()
+    installed: dict[str, object] = {}
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: proxy)
+    monkeypatch.setattr(
+        metrics,
+        "set_meter_provider",
+        lambda provider: installed.setdefault("provider", provider),
+    )
+
     monkeypatch.setenv("COMPETITIONOPS_OTEL_CONSOLE", "1")
     # Should not raise.
     main_module._wire_otel_exporters()
+    # And the console reader DID install a fresh SDK MeterProvider —
+    # silent-drop would have left ``installed`` empty.
+    assert "provider" in installed, (
+        "M1 regression: ConsoleMetricExporter readers were silently "
+        "dropped instead of installing a new MeterProvider."
+    )
 
 
 def test_wire_otel_exporters_no_env_runs_but_attaches_nothing(
@@ -116,15 +143,33 @@ def test_wire_otel_exporters_otlp_mode_runs_without_error(
 ) -> None:
     """Verifies the lazy-import path for OTLP works when the exporter
     package is installed. Skipped automatically on stripped-down clones
-    (``uv sync`` without ``--extra otel``).
+    (``uv sync`` without ``--extra otel``). Isolated from session-
+    level MeterProvider state for the same reason the console-mode
+    test is — see its M1 docstring.
     """
     pytest.importorskip(
         "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
         reason="requires `uv sync --extra otel` for opentelemetry-exporter-otlp",
     )
+
+    from opentelemetry import metrics
+    from opentelemetry.metrics._internal import _ProxyMeterProvider
+
+    proxy = _ProxyMeterProvider()
+    installed: dict[str, object] = {}
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: proxy)
+    monkeypatch.setattr(
+        metrics,
+        "set_meter_provider",
+        lambda provider: installed.setdefault("provider", provider),
+    )
+
     monkeypatch.setenv(
         "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector.example.invalid:4317"
     )
     # Should not raise; OTLP exporter constructs lazily — actual gRPC
     # connection happens on first export, not at instantiation.
     main_module._wire_otel_exporters()
+    assert "provider" in installed, (
+        "M1 regression: OTLPMetricExporter reader was silently dropped."
+    )
