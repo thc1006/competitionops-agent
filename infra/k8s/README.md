@@ -62,17 +62,43 @@ the cost of losing audit on pod restart.
 
 ## H2 — single-replica prod gate
 
-``src/competitionops/main.py::_plan_repo()`` is an
-``@lru_cache(maxsize=1)`` singleton over ``InMemoryPlanRepository`` — a
-process-bound ``dict[str, ActionPlan]``. With multiple pods, a plan
-created on pod A is invisible to pod B, so any
-``POST /plans/{plan_id}/approve`` routed to a different pod returns
-404. The prod overlay is therefore pinned to ``replicas: 1``. To lift
-this gate, implement a shared ``PlanRepository`` (SQLite-on-PVC,
-Postgres, or Redis) and wire it into ``_plan_repo()`` via the same
-env-driven switch ``_audit_log`` already uses (Tier 0 #4). Once that
-lands, bump prod replicas back to 3+ and the existing
-``podAntiAffinity`` block starts spreading the pods across nodes.
+``src/competitionops/main.py::_plan_repo()`` defaults to
+``InMemoryPlanRepository`` — a process-bound ``dict[str, ActionPlan]``.
+With multiple pods on that adapter, a plan created on pod A is invisible
+to pod B, so any ``POST /plans/{plan_id}/approve`` routed to a different
+pod returns 404. The prod overlay is therefore pinned to ``replicas: 1``.
+
+### What's already shipped
+
+- ``FilePlanRepository`` adapter under
+  ``src/competitionops/adapters/file_plan_store.py``. One JSON file per
+  ``plan_id``, atomic-rename save (``os.replace``) so readers see either
+  the old complete file or the new one, never a partial. Multi-pod
+  readers on a shared volume are safe.
+- Factory switch in ``_plan_repo()`` honors
+  ``Settings.plan_repo_dir`` (env ``PLAN_REPO_DIR``), mirroring how
+  ``_audit_log`` honors ``AUDIT_LOG_DIR``. Setting the env var alone
+  flips both the FastAPI and the MCP processes onto the file-backed
+  adapter.
+
+### What still gates the pin
+
+H3 — multi-writer safety for the ``FileAuditLog`` JSONL appends. While
+replicas=1, only one pod writes the audit log, so the append-after-append
+race is dormant. The moment replicas climbs without an H3 fix
+(``fcntl.flock`` around the append, or per-pod filenames), concurrent
+``approve_and_execute`` calls torn-write the JSONL and ``list_for_plan``
+starts failing to parse some records.
+
+### Operator checklist to lift the pin
+
+1. Mount a shared volume at a path of your choice (the existing
+   ``competitionops-audit`` PVC works; just pick a different subdir or a
+   separate PVC for plans).
+2. Set ``PLAN_REPO_DIR=/path/on/that/volume`` via configmap or secret.
+3. Confirm H3 is closed in your build (until then, keep replicas=1).
+4. Edit ``overlays/prod/deployment-patch.yaml`` to bump replicas. The
+   ``podAntiAffinity`` block is already in place to spread pods.
 
 ## Secrets
 

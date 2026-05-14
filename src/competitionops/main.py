@@ -6,12 +6,13 @@ from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from competitionops.adapters.file_audit import FileAuditLog
+from competitionops.adapters.file_plan_store import FilePlanRepository
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import Settings, get_settings
-from competitionops.ports import AuditLogPort
+from competitionops.ports import AuditLogPort, PlanRepository
 from competitionops.schemas import (
     ActionPlan,
     ApprovalDecision,
@@ -129,13 +130,24 @@ FastAPIInstrumentor.instrument_app(app)
 
 
 @lru_cache(maxsize=1)
-def _plan_repo() -> InMemoryPlanRepository:
-    # H2 — InMemoryPlanRepository is process-bound (a dict[str, ActionPlan]).
-    # The prod overlay is pinned to replicas=1 because of this; lifting that
-    # pin needs a shared-state PlanRepository adapter (SQLite-on-PVC,
-    # Postgres, Redis) wired here via an env-driven switch, mirroring how
-    # ``_audit_log`` selects FileAuditLog vs InMemoryAuditLog from
-    # ``Settings.audit_log_dir`` (Tier 0 #4).
+def _plan_repo() -> PlanRepository:
+    """Plan repository singleton.
+
+    H2 — When ``Settings.plan_repo_dir`` is set (typically via
+    ``PLAN_REPO_DIR=/var/lib/competitionops/plans``), plans persist to
+    one ``<plan_id>.json`` file per plan under that directory.
+    Otherwise the process-bound in-memory adapter is used (dev / unit
+    tests). Mirrors the ``_audit_log`` switch from Tier 0 #4.
+
+    Setting this env var alone does NOT make multi-replica prod safe —
+    the audit log still uses an unsynchronised append (H3 dormant).
+    The prod ``replicas: 1`` pin in
+    ``infra/k8s/overlays/prod/deployment-patch.yaml`` should only be
+    lifted after the H3 multi-writer fix lands.
+    """
+    plan_dir = get_settings().plan_repo_dir
+    if plan_dir:
+        return FilePlanRepository(base_dir=Path(plan_dir))
     return InMemoryPlanRepository()
 
 
@@ -159,7 +171,7 @@ def _registry() -> AdapterRegistry:
     return build_default_registry()
 
 
-def get_plan_repo() -> InMemoryPlanRepository:
+def get_plan_repo() -> PlanRepository:
     return _plan_repo()
 
 
@@ -172,7 +184,7 @@ def get_registry() -> AdapterRegistry:
 
 
 def get_execution_service(
-    plan_repo: InMemoryPlanRepository = Depends(get_plan_repo),
+    plan_repo: PlanRepository = Depends(get_plan_repo),
     registry: AdapterRegistry = Depends(get_registry),
     audit: AuditLogPort = Depends(get_audit_log),
     settings: Settings = Depends(get_settings),
@@ -298,7 +310,7 @@ async def extract_brief_from_pdf(
 async def generate_plan(
     payload: PlanGenerateRequest,
     settings: Settings = Depends(get_settings),
-    plan_repo: InMemoryPlanRepository = Depends(get_plan_repo),
+    plan_repo: PlanRepository = Depends(get_plan_repo),
 ) -> ActionPlan:
     planner = CompetitionPlanner(settings=settings)
     plan = planner.generate(

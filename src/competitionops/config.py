@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # writing to this directory, so audit records survive process restart.
     # Leaving this None keeps the in-memory adapter (dev / unit-test default).
     audit_log_dir: str | None = None
+    # H2 follow-up — when set (e.g., env PLAN_REPO_DIR=/var/lib/competitionops/plans)
+    # the plan repository factory returns a FilePlanRepository instead of the
+    # process-bound InMemoryPlanRepository. Plans survive pod restart; each
+    # plan_id is its own JSON file with atomic-rename save so multi-pod reads
+    # are safe. (Lifting the prod replicas=1 pin still requires the H3 audit-
+    # log multi-writer fix in addition to this.)
+    plan_repo_dir: str | None = None
 
     anthropic_api_key: SecretStr | None = None
 
