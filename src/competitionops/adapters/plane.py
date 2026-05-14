@@ -67,6 +67,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from competitionops.adapters._http_errors import safe_error_summary
 from competitionops.config import Settings, get_settings
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
@@ -324,14 +325,16 @@ class PlaneAdapter:
                 message="Plane adapter rejected payload.",
             )
         except httpx.HTTPStatusError as exc:
+            # M8 — never echo the raw response body. ``safe_error_summary``
+            # surfaces structured JSON error fields ONLY and falls back to
+            # ``<status> <reason>`` for HTML / opaque payloads so a
+            # self-hosted Plane 500 page cannot leak stack traces /
+            # internal hostnames into the audit log.
             return ExternalActionResult(
                 action_id=action.action_id,
                 target_system="plane",
                 status="failed",
-                error=(
-                    f"plane api status {exc.response.status_code}: "
-                    f"{exc.response.text[:200]}"
-                ),
+                error=safe_error_summary(exc.response, target="plane"),
                 message="Plane REST returned an error status.",
             )
         except httpx.HTTPError as exc:
