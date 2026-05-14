@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     plane_workspace_slug: str | None = None
     plane_project_id: str | None = None
 
+    # P2-005 Sprint 3 — PDF parser backend. ``None`` / ``"mock"`` keeps
+    # the Sprint 0 byte-decode mock (zero deps, fine for synthetic
+    # briefs); ``"docling"`` loads the IBM Research Docling parser
+    # (real layout-aware PDF extraction; requires
+    # ``uv sync --extra ocr``). Unknown values fail loudly at the
+    # ``runtime._pdf_adapter`` factory rather than silently falling
+    # back to mock — operator typos surface at startup.
+    pdf_adapter: str | None = None
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 

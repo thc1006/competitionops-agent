@@ -332,7 +332,7 @@ reason).
 
 ### P2-005 — Local OCR / layout parsing with GPU
 
-Status: **Sprint 0-2 Done (2026-05-14)** — ``PdfIngestionPort``
+Status: **Sprint 0-3 Done (2026-05-15)** — ``PdfIngestionPort``
 Protocol (``extract(pdf_bytes) -> str``) + ``MockPdfAdapter`` (strips
 ``%PDF-`` header, decodes the rest as UTF-8 — Sprint 0).
 ``BriefExtractor.extract_from_pdf(pdf_bytes)`` glues the port to the
@@ -341,10 +341,29 @@ existing text extractor and computes
 provenance (Sprint 1). ``POST /briefs/extract/pdf`` multipart endpoint
 accepts ``UploadFile`` with a 10 MiB hard cap (413) + ``%PDF-`` magic
 check (422); the Stage 5 OpenAPI guard now skips multipart bodies
-since they don't carry a JSON schema (Sprint 2). 13 tests cover all
-three sprints. Sprints 3 (Docling real engine), 4 (GPU), and 5
-(Drive path) deferred — they need either ``--extra ocr`` or the
-not-yet-shipped P1-005 real Drive adapter.
+since they don't carry a JSON schema (Sprint 2). Sprint 3 (2026-05-15)
+lands ``DoclingPdfAdapter`` for real layout-aware extraction —
+opt-in via ``PDF_ADAPTER=docling`` and ``uv sync --extra ocr`` (heavy
+ML deps so default install stays light). ``runtime._pdf_adapter()``
+factory switches on ``Settings.pdf_adapter`` with deterministic
+``ValueError`` on unknown values (prevents silent fallback on operator
+typo) and a friendlier ``RuntimeError`` pointing at the install path
+when ``docling`` is missing. Sprints 4 (GPU) and 5 (Drive path)
+deferred — they need either ``--extra ocr-gpu`` (future) or P1-005
+real Drive adapter.
+
+**M6 (2026-05-15) closed** — ``POST /briefs/extract/pdf`` now resolves
+the adapter through ``Depends(get_pdf_adapter)`` instead of
+constructing ``MockPdfAdapter()`` inline. Tests inject stubs via
+``app.dependency_overrides`` without monkey-patching anything. A
+structural AST guard (``test_pdf_upload_endpoint_does_not_hard_code_mock_pdf_adapter``)
+walks the handler source and fails if a ``MockPdfAdapter(`` Call node
+ever reappears. 10 new tests cover Settings field, runtime factory
+defaults / explicit-mock / unknown-value-raises / singleton / port
+satisfaction, endpoint DI replacement, AST structural guard, lazy
+ImportError-when-missing path; 3 additional integration tests behind
+``pytest.importorskip("docling")`` exercise the real engine after
+``uv sync --extra ocr``.
 
 **M5 (2026-05-14) closed** — PDF upload handler now reads the body in
 1 MiB chunks and raises 413 the moment accumulated bytes overshoot
