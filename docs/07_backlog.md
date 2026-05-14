@@ -1,9 +1,10 @@
 # 07 — Backlog
 
-> **Status snapshot (2026-05-14):** P0-001 through P0-006 are implemented,
-> tested (84 passed in 1.37s), and committed. P1 not started. P2-004 in
-> progress (Sprint 0+2+3 done). See `docs/10_p2_roadmap.md` for the active
-> P2 sprint sequence.
+> **Status snapshot (2026-05-15):** P0-001 through P0-006 + P1-004 + P1-005
+> + P2-001 through P2-005 (Sprint 0-3) implemented; both rounds of deep
+> review closed for Critical / High / Medium (round 2 hygiene Low / Info
+> open). Current test count: 396 passed + 4 skipped. See
+> `docs/10_p2_roadmap.md` for the active P2 sprint sequence.
 
 ## P0
 

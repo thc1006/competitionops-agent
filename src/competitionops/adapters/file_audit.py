@@ -52,6 +52,7 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 
+from competitionops.adapters._path_utils import sanitise_filename_segment
 from competitionops.schemas import AuditRecord
 
 
@@ -109,18 +110,7 @@ class FileAuditLog:
         safe_plan = self._sanitise(plan_id)
         return self.base_dir / f"{safe_plan}.{self.writer_id}.jsonl"
 
-    @staticmethod
-    def _sanitise(value: str) -> str:
-        """Map an arbitrary id to a safe filename segment.
-
-        Hash-based plan_ids and k8s pod names only contain
-        ``[A-Za-z0-9_-]`` so this is a no-op for legitimate values. ``.``
-        is intentionally NOT in the allowed set — it would let ``..``
-        appear as a filename component, which is the path-traversal
-        pattern we are defending against (mirrors the same defence in
-        ``FilePlanRepository``).
-        """
-        cleaned = "".join(
-            char if char.isalnum() or char in "-_" else "_" for char in value
-        )
-        return cleaned or "_"
+    # Round-2 L3 — shared with FilePlanRepository via _path_utils.
+    # Method-style attribute keeps backward compat with any test that
+    # patches ``FileAuditLog._sanitise`` directly.
+    _sanitise = staticmethod(sanitise_filename_segment)

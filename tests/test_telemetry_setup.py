@@ -18,8 +18,11 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 
-from competitionops.telemetry import setup_meter_provider, setup_tracer_provider
-from competitionops.telemetry.setup import OtelInstallOrderError
+from competitionops.telemetry import (
+    OtelInstallOrderError,
+    setup_meter_provider,
+    setup_tracer_provider,
+)
 
 
 def test_setup_creates_tracer_provider() -> None:

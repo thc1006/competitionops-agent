@@ -120,6 +120,15 @@ def _pdf_adapter() -> PdfIngestionPort:
         # Lazy import — Docling pulls in torch / easyocr / pypdfium2.
         # Only operators who explicitly opted in (PDF_ADAPTER=docling)
         # pay this cost.
+        #
+        # Round-2 L5 — NO ``# type: ignore[import-not-found]`` here
+        # (unlike ``main.py`` for OTLP and ``pdf_docling.py`` itself
+        # for the Docling SDK). This import is a FIRST-PARTY module
+        # path (``competitionops.adapters.pdf_docling``) that always
+        # exists in the source tree; only its transitive ``docling``
+        # SDK import may be missing. The ``except ModuleNotFoundError``
+        # turns that missing SDK into a clear ``RuntimeError`` with
+        # operator guidance — strictly better than mypy silence.
         try:
             from competitionops.adapters.pdf_docling import DoclingPdfAdapter
         except ModuleNotFoundError as exc:
