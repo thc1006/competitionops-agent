@@ -110,6 +110,19 @@ async def extract_brief(
     payload: BriefExtractRequest,
     settings: Settings = Depends(get_settings),
 ) -> CompetitionBrief:
+    # Tier 0 #1: source_type=url|drive passes the SSRF allow-list at
+    # validation time, but the real fetch implementation lands in P1-006.
+    # Refuse explicitly with 501 so callers don't think the call silently
+    # succeeded.
+    if payload.source_type != "text":
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=(
+                f"source_type={payload.source_type!r} is not implemented in "
+                f"the MVP; URL / Drive ingestion lands in P1-006. The SSRF "
+                f"allow-list has already validated {payload.source_uri!r}."
+            ),
+        )
     extractor = BriefExtractor(settings=settings)
     return extractor.extract_from_text(
         content=payload.content, source_uri=payload.source_uri

@@ -1,8 +1,8 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Priority(str, Enum):
@@ -158,9 +158,49 @@ class AuditRecord(BaseModel):
 
 
 class BriefExtractRequest(BaseModel):
-    source_type: Literal["text"] = "text"
+    """Request body for ``POST /briefs/extract``.
+
+    ``source_type="text"`` is the only ingestion path implemented in the
+    MVP — ``content`` is required. ``"url"`` and ``"drive"`` are accepted
+    at validation time (SSRF allow-list runs here, Tier 0 #1) but the
+    endpoint returns 501 until P1-006 lands the real fetcher.
+    """
+
+    source_type: Literal["text", "url", "drive"] = "text"
     source_uri: str | None = None
-    content: str = Field(min_length=1)
+    content: str = ""
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> Self:
+        # Imported locally to keep schemas.py importable even if the security
+        # subpackage is ever vendored separately.
+        from competitionops.security.source_uri_validator import (
+            UnsafeSourceURIError,
+            assert_safe_drive_uri,
+            assert_safe_url,
+        )
+
+        if self.source_type == "text":
+            if not self.content:
+                raise ValueError(
+                    "content must be non-empty when source_type='text'"
+                )
+            return self
+
+        if not self.source_uri:
+            raise ValueError(
+                f"source_uri is required when source_type={self.source_type!r}"
+            )
+
+        try:
+            if self.source_type == "url":
+                assert_safe_url(self.source_uri)
+            elif self.source_type == "drive":
+                assert_safe_drive_uri(self.source_uri)
+        except UnsafeSourceURIError as exc:
+            raise ValueError(f"unsafe source_uri: {exc}") from exc
+
+        return self
 
 
 class PlanPreferences(BaseModel):

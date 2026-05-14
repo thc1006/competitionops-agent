@@ -30,7 +30,7 @@
 
 | ID | 主題 | Sprints | 估時（solo full-time） | 依賴 | 狀態 |
 |---|---|---:|---|---|---|
-| Tier 0 #1 | SSRF allow-list | 2 | 0.5 d | — | 待辦 |
+| Tier 0 #1 | SSRF allow-list | 2 | 0.5 d | — | ✅ Done (2026-05-14, source_uri_validator) |
 | Tier 0 #2 | SecretStr for OAuth keys | 2 | 0.5 d | — | ✅ Done (2026-05-14, commit pending) |
 | Tier 0 #3 | Plane real adapter + external_id | 4 | 2 d | — | 待辦 |
 | Tier 0 #4 | Audit log 落地（File / sqlite） | 4 | 2 d | — | ✅ Done (2026-05-14, FileAuditLog) |
@@ -442,3 +442,4 @@ bash scripts/verify.sh
 | 2026-05-13 | 初版建立；P2-001 ~ P2-005 + Tier 0 cross-ref 完整 TDD step-by-step | Claude Code（Stage 8 後置） |
 | 2026-05-14 | P2-004 Sprint 0+2+3+4+5 全綠；Tier 0 #2 SecretStr ✅ | Claude Code |
 | 2026-05-14 | Tier 0 #4 FileAuditLog 落地；AUDIT_LOG_DIR env 切換；13 條新測試 | Claude Code |
+| 2026-05-14 | Tier 0 #1 SSRF allow-list；BriefExtractRequest 擴 url/drive；41 條新測試；P1-006 ready | Claude Code |
