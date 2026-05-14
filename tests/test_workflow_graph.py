@@ -290,3 +290,127 @@ def test_audit_node_returns_empty_when_no_plan() -> None:
     an empty list rather than crashing."""
     update = audit_node({})
     assert update == {"audit_records": []}
+
+
+# ---------------------------------------------------------------------------
+# M3 — Reducer annotations on accumulative state fields.
+#
+# Today the workflow is a single linear chain (extract → plan → approve
+# → execute → audit), so the only writer of ``executed`` /
+# ``skipped`` / ``failed`` / ``blocked`` / ``audit_records`` is one
+# node. Without LangGraph reducer annotations, a future fan-out
+# (e.g. ``Send`` API dispatching one execute task per action, or a
+# per-record audit pipeline) would silently last-write-wins on these
+# lists. Locking the reducer contract NOW keeps that future refactor
+# safe.
+# ---------------------------------------------------------------------------
+
+
+def test_accumulative_state_fields_declare_operator_add_reducer() -> None:
+    """Structural guard: each accumulative field must be
+    ``Annotated[list[dict[str, Any]], operator.add]`` so LangGraph
+    merges parallel writes by appending rather than replacing."""
+    import operator
+    from typing import get_args, get_origin, get_type_hints
+
+    from competitionops.workflows.state import CompetitionOpsState
+
+    hints = get_type_hints(CompetitionOpsState, include_extras=True)
+    accumulative = (
+        "executed",
+        "skipped",
+        "failed",
+        "blocked",
+        "audit_records",
+    )
+    for field in accumulative:
+        annotation = hints[field]
+        metadata = getattr(annotation, "__metadata__", ())
+        assert metadata, (
+            f"{field!r} must be ``Annotated[...]`` to carry a reducer"
+        )
+        assert operator.add in metadata, (
+            f"M3: {field!r} must declare ``operator.add`` as its "
+            f"LangGraph reducer. Got metadata={metadata!r}. Without "
+            "this, a future fan-out (Send / parallel sub-graphs) "
+            "would silently last-write-wins on this list."
+        )
+        # The underlying type must still be ``list[...]`` so downstream
+        # code (model_dump / JSON checkpointing) works.
+        underlying = get_args(annotation)[0]
+        assert get_origin(underlying) is list, (
+            f"{field!r} underlying type must be list, got {underlying!r}"
+        )
+
+
+def test_non_accumulative_state_fields_remain_unannotated() -> None:
+    """Defence against over-application: fields that are single-writer
+    (caller inputs, extract / plan / approve outputs) must NOT carry an
+    additive reducer. Otherwise re-invoking the graph with the same
+    thread_id would accumulate duplicates (e.g. ``brief`` becoming
+    ``[brief1, brief2]``) which is nonsense for those fields."""
+    import operator
+    from typing import get_type_hints
+
+    from competitionops.workflows.state import CompetitionOpsState
+
+    hints = get_type_hints(CompetitionOpsState, include_extras=True)
+    single_writer = (
+        "raw_brief_text",
+        "source_uri",
+        "team_capacity",
+        "actor",
+        "brief",
+        "plan",
+        "approved_action_ids",
+        "rejected_action_ids",
+    )
+    for field in single_writer:
+        annotation = hints[field]
+        metadata = getattr(annotation, "__metadata__", ())
+        assert operator.add not in metadata, (
+            f"M3: {field!r} should NOT have operator.add — it's a "
+            "single-writer field. Adding a reducer would cause "
+            "duplicates on graph replay."
+        )
+
+
+def test_executed_field_accumulates_across_parallel_writers() -> None:
+    """Behavioural proof of the M3 contract: two parallel writers
+    dispatched via LangGraph's ``Send`` API BOTH contribute their
+    record to the final ``executed`` list. Without the reducer this
+    would either raise ``InvalidUpdateError`` or silently keep only
+    one writer's value.
+    """
+    # Local imports — Send must not be a function-scoped name when
+    # LangGraph reflects on ``dispatcher``'s return annotation, so
+    # ``dispatcher`` deliberately has no return annotation.
+    from langgraph.graph import END, StateGraph
+    from langgraph.types import Send
+
+    from competitionops.workflows.state import CompetitionOpsState
+
+    def dispatcher(state):  # noqa: ANN001, ANN202 — see note above
+        # Fan-out: each "action" goes to its own writer via Send.
+        return [
+            Send("writer", {"action_id": "act_a"}),
+            Send("writer", {"action_id": "act_b"}),
+        ]
+
+    def writer(payload: dict[str, str]) -> dict[str, list[dict[str, str]]]:
+        return {"executed": [{"action_id": payload["action_id"]}]}
+
+    builder: StateGraph = StateGraph(CompetitionOpsState)
+    builder.add_node("entry", lambda s: {})  # no-op pass-through
+    builder.add_node("writer", writer)
+    builder.add_conditional_edges("entry", dispatcher, ["writer"])
+    builder.add_edge("writer", END)
+    builder.set_entry_point("entry")
+    graph = builder.compile()
+
+    result = graph.invoke({})
+    executed_ids = {item["action_id"] for item in result.get("executed", [])}
+    assert executed_ids == {"act_a", "act_b"}, (
+        f"M3: parallel writers via Send must accumulate via the "
+        f"operator.add reducer. Got executed={result.get('executed')!r}"
+    )
