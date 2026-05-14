@@ -406,3 +406,136 @@ async def test_real_append_section_surfaces_network_error_as_failed_action() -> 
     err = result.error or ""
     assert "SECRET-MSG-CONTENT" not in err
     assert "SECRET-BODY-CONTENT" not in err
+
+
+# ---------------------------------------------------------------------------
+# Post-review polish (review issues 2 / 3 / 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_create_doc_fails_loudly_when_response_missing_documentId() -> None:
+    """Review issue 3 — a 200 response without ``documentId`` was
+    previously swallowed: the adapter produced ``external_id=""`` and a
+    broken UI URL ``…/document/d//edit``. That hides a real upstream
+    bug (Docs shim contract violation). Surface it as ``status=failed``
+    with a clear message instead. We do NOT raise out of ``execute()``
+    because the dispatcher promises to always return an
+    ``ExternalActionResult``."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Empty body — no documentId.
+        return httpx.Response(200, json={"title": "Whoops"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleDocsAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(_make_create_action(), dry_run=False)
+
+    assert result.status == "failed"
+    err = (result.error or "").lower()
+    assert "documentid" in err, (
+        "Failure message must name the missing field so operators can "
+        "diagnose without digging into the response body."
+    )
+    # And external_id must NOT be the empty string masquerading as a
+    # real id — that would corrupt audit logs.
+    assert result.external_id in (None, ""), result
+    # (The current dispatcher leaves external_id unset on failure;
+    # either None or empty is acceptable. The point is it must not
+    # look like a real documentId.)
+
+
+@pytest.mark.asyncio
+async def test_real_create_doc_with_failed_batchUpdate_preserves_documentId() -> None:
+    """Review issue 2 — partial-failure surface. ``documents.create``
+    succeeded so a doc was created on Google's side; only the section
+    insertion (``batchUpdate``) failed. Previously the adapter raised
+    ``HTTPStatusError`` and the dispatcher returned ``failed`` with NO
+    ``external_id`` — so the audit record lost the documentId and the
+    PM had no way to find / clean up the stray empty doc.
+
+    New contract: surface ``status=failed`` AND keep the documentId in
+    ``external_id`` + the user-facing URL in ``external_url`` so the
+    audit trail links to the partially-completed doc. The error field
+    explains what failed (section insertion) without leaking
+    response body."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/documents":
+            return httpx.Response(200, json={"documentId": "partial-doc-7"})
+        # batchUpdate fails
+        return httpx.Response(500, json={"error": "internal"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleDocsAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(
+            _make_create_action(sections=["A", "B"]), dry_run=False
+        )
+
+    assert result.status == "failed"
+    assert result.external_id == "partial-doc-7", (
+        "documentId from the successful create must survive the "
+        "batchUpdate failure so audit + PM cleanup can link to the doc."
+    )
+    assert result.external_url is not None and "partial-doc-7" in result.external_url
+    # Error must name the partial-failure shape, not just "500"
+    # (otherwise it looks like the whole call failed and the doc never
+    # got created).
+    err = (result.error or "").lower()
+    assert "section" in err or "batchupdate" in err or "partial" in err
+
+
+@pytest.mark.asyncio
+async def test_real_create_doc_with_failed_batchUpdate_network_error_preserves_documentId() -> None:
+    """Issue 2 extension — same contract when the batchUpdate failure
+    is a network-class error (not HTTPStatusError). The documentId
+    from the create response must still be preserved."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/documents":
+            return httpx.Response(200, json={"documentId": "doc-net-fail"})
+        raise httpx.ConnectError("network", request=request)
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleDocsAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(
+            _make_create_action(sections=["A"]), dry_run=False
+        )
+
+    assert result.status == "failed"
+    assert result.external_id == "doc-net-fail"
+    # Class name still surfaces for operator diagnosis.
+    err = result.error or ""
+    assert "ConnectError" in err
+
+
+def test_dry_run_preview_falls_back_to_action_id_when_payload_empty() -> None:
+    """Review issue 5 — when the action payload has neither ``title``
+    (create path) nor ``doc_id`` (append path), the synthetic preview
+    id was previously ``dry_run_<sha1("")>`` — same hash for every
+    empty-payload action, breaking deterministic-per-action property.
+    Falling back to ``action.action_id`` keeps uniqueness."""
+    adapter = GoogleDocsAdapter(settings=_real_settings())
+    action_a = ExternalAction(
+        action_id="act_alpha",
+        type="google.docs.create_proposal_outline",
+        target_system="google_docs",
+        payload={},  # no title
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    action_b = ExternalAction(
+        action_id="act_beta",
+        type="google.docs.create_proposal_outline",
+        target_system="google_docs",
+        payload={},  # no title — same empty payload
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    preview_a = adapter._dry_run_preview(action_a)
+    preview_b = adapter._dry_run_preview(action_b)
+
+    assert preview_a.external_id is not None and preview_a.external_id.startswith("dry_run_")
+    assert preview_b.external_id is not None and preview_b.external_id.startswith("dry_run_")
+    assert preview_a.external_id != preview_b.external_id, (
+        "Two empty-payload preview actions with different action_ids "
+        "must produce different synthetic ids — otherwise PMs see "
+        "duplicate audit entries for distinct previews."
+    )

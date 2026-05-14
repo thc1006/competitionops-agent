@@ -74,6 +74,13 @@ def _docs_ui_url(document_id: str) -> str:
     return f"https://docs.google.com/document/d/{document_id}/edit"
 
 
+class _MissingDocumentIdError(Exception):
+    """Raised when Docs ``documents.create`` returns 200 without a
+    ``documentId`` (upstream contract violation). Caught inside
+    ``execute()`` to convert into ``ExternalActionResult.failed``
+    without losing the named diagnostic. Review issue 3."""
+
+
 class GoogleDocsAdapter:
     def __init__(
         self,
@@ -167,33 +174,79 @@ class GoogleDocsAdapter:
             )
             response.raise_for_status()
             data: dict[str, Any] = response.json()
-            document_id = data.get("documentId", "")
+            # Review issue 3 — a 200 response without ``documentId`` is
+            # a Docs-shim contract violation. Surface it loudly with a
+            # named error rather than silently producing ``external_id=""``
+            # + a broken ``…/document/d//edit`` UI URL. ``execute()``
+            # catches this to keep the adapter contract (always return
+            # ExternalActionResult).
+            document_id = data.get("documentId")
+            if not document_id:
+                raise _MissingDocumentIdError(
+                    "Docs documents.create response missing documentId"
+                )
+
+            result: dict[str, Any] = {
+                "id": document_id,
+                "title": data.get("title", title),
+                "sections": list(sections or []),
+                "url": _docs_ui_url(document_id),
+            }
 
             if sections:
                 # Two-step contract: create returns an empty doc body,
                 # batchUpdate inserts the section headings at the end.
+                #
+                # Review issue 2 — the doc has ALREADY been created on
+                # Google's side. If batchUpdate fails, raising would
+                # lose the documentId and produce a ``failed`` audit
+                # record that doesn't link to the stray empty doc.
+                # Instead capture the failure as a structured
+                # ``partial_failure`` field; the dispatcher converts it
+                # to ``status=failed`` while keeping ``external_id`` /
+                # ``external_url`` so PMs can find and clean up.
                 batchupdate_url = (
                     s.google_docs_api_base.rstrip("/")
                     + f"/v1/documents/{document_id}:batchUpdate"
                 )
-                batch_response = await client.post(
-                    batchupdate_url,
-                    json={"requests": _build_section_insert_requests(sections)},
-                    headers=headers,
-                    timeout=_HTTP_TIMEOUT_SECONDS,
-                )
-                batch_response.raise_for_status()
+                try:
+                    batch_response = await client.post(
+                        batchupdate_url,
+                        json={"requests": _build_section_insert_requests(sections)},
+                        headers=headers,
+                        timeout=_HTTP_TIMEOUT_SECONDS,
+                    )
+                    batch_response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    result["partial_failure"] = (
+                        "section insertion failed: "
+                        + safe_error_summary(exc.response, target="docs")
+                    )
+                except (httpx.HTTPError, httpx.InvalidURL) as exc:
+                    result["partial_failure"] = (
+                        "section insertion failed: "
+                        + safe_network_summary(exc, target="docs")
+                    )
 
-        return {
-            "id": document_id,
-            "title": data.get("title", title),
-            "sections": list(sections or []),
-            "url": _docs_ui_url(document_id),
-        }
+        return result
 
     async def _real_append_section(
         self, *, doc_id: str, heading: str, body: str
     ) -> dict[str, Any]:
+        """Real-mode append. Returns ``{"id": doc_id, "url": ...}``.
+
+        Review issue 4 — note the **return-shape divergence** from the
+        mock. ``_mock_append_section`` returns the full stateful doc
+        dict with ``sections`` + ``body`` populated; real mode has no
+        local state (Google owns the doc body now), so only ``id`` and
+        ``url`` are guaranteed. ``execute()`` only reads ``doc["id"]``
+        + ``doc.get("url")`` so the dispatcher is safe across modes,
+        but callers that invoke ``adapter.append_section(...)``
+        directly and inspect ``["sections"]`` work on mock and
+        ``KeyError`` on real. Use the dispatch path (``execute``) or
+        re-fetch the doc via Docs ``documents.get`` if you need the
+        full body shape.
+        """
         s = self.settings
         assert s.google_oauth_access_token is not None  # for mypy
         token = s.google_oauth_access_token.get_secret_value()
@@ -256,6 +309,26 @@ class GoogleDocsAdapter:
                     title=action.payload["title"],
                     sections=action.payload.get("sections"),
                 )
+                # Review issue 2 — partial-failure surface. The doc was
+                # created (so ``id`` and ``url`` are real) but
+                # ``batchUpdate`` failed to insert the section headings.
+                # Surface as ``failed`` so the PM sees something went
+                # wrong, while keeping ``external_id`` / ``external_url``
+                # so the audit + UI can link to the stray empty doc.
+                if doc.get("partial_failure"):
+                    return ExternalActionResult(
+                        action_id=action.action_id,
+                        target_system="google_docs",
+                        status="failed",
+                        external_id=doc["id"],
+                        external_url=doc.get("url"),
+                        error=doc["partial_failure"],
+                        message=(
+                            "Doc created but section insertion failed — "
+                            "operator must clean up the stray doc or "
+                            "retry section insert."
+                        ),
+                    )
                 return self._success(
                     action,
                     dry_run=dry_run,
@@ -283,6 +356,18 @@ class GoogleDocsAdapter:
                 status="failed",
                 error=f"missing payload field: {exc}",
                 message="Docs adapter rejected payload.",
+            )
+        except _MissingDocumentIdError as exc:
+            # Review issue 3 — upstream contract violation: Docs
+            # returned 200 without ``documentId``. Surface the named
+            # diagnostic; do NOT echo response body (str(exc) is
+            # adapter-authored so safe).
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_docs",
+                status="failed",
+                error=str(exc),
+                message="Docs response shape violated contract.",
             )
         except httpx.HTTPStatusError as exc:
             # M8 — never echo the raw response body. Captive portals
@@ -322,15 +407,21 @@ class GoogleDocsAdapter:
     def _dry_run_preview(self, action: ExternalAction) -> ExternalActionResult:
         """Synthetic preview for dry-run real-mode. Mirrors Plane / Drive.
 
-        external_id is deterministic over the action payload so a PM
-        previewing twice sees the same synthetic id. external_url is
-        None — no real doc has been created. Audit consumers render
-        "preview only" UI off the dry_run status.
+        external_id is deterministic over the action so a PM previewing
+        twice sees the same synthetic id. external_url is None — no
+        real doc has been created. Audit consumers render "preview
+        only" UI off the dry_run status.
+
+        Review issue 5 — fall back to ``action.action_id`` when neither
+        ``title`` (create) nor ``doc_id`` (append) is in the payload.
+        Hashing the empty string yields the same synthetic id for every
+        empty-payload preview, breaking the deterministic-per-action
+        guarantee.
         """
         if action.type in _CREATE_TYPES:
-            key = action.payload.get("title", "")
+            key = action.payload.get("title") or action.action_id
         else:
-            key = action.payload.get("doc_id", "")
+            key = action.payload.get("doc_id") or action.action_id
         synthetic_id = f"dry_run_{_hash(str(key))}"
         return ExternalActionResult(
             action_id=action.action_id,
