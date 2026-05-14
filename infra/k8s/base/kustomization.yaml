@@ -1,10 +1,13 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: competitionops
+# Base is overlay-only — no namespace pinned here. Each overlay sets
+# its own ``namespace:`` field AND ships a matching ``namespace.yaml``
+# so the Namespace resource is actually created on apply. (Kustomize's
+# ``namespace:`` field cannot rename a Namespace kind, which is why
+# this layout has to live in the overlays.)
 
 resources:
-  - namespace.yaml
   - deployment.yaml
   - service.yaml
   - configmap.yaml

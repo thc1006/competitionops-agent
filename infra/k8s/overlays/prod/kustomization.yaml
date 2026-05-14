@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: competitionops-prod
 
 resources:
+  - namespace.yaml
   - ../../base
   - ingress.yaml
 

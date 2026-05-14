@@ -47,7 +47,9 @@ def test_kustomize_base_lists_all_required_resources() -> None:
     kustomization = _load_yaml(_BASE / "kustomization.yaml")
     listed = set(kustomization["resources"])
     expected = {
-        "namespace.yaml",
+        # H1 fix — namespace.yaml moved out of base into each overlay.
+        # Base no longer declares a Namespace kind because kustomize's
+        # ``namespace:`` field cannot rename one.
         "deployment.yaml",
         "service.yaml",
         "configmap.yaml",
@@ -59,9 +61,17 @@ def test_kustomize_base_lists_all_required_resources() -> None:
     )
 
 
-def test_kustomize_base_targets_competitionops_namespace() -> None:
+def test_kustomize_base_is_overlay_only_and_does_not_pin_a_namespace() -> None:
+    """Base used to set ``namespace: competitionops`` and ship a matching
+    Namespace resource. After the H1 fix, base is overlay-only — the
+    ``namespace:`` field is dropped so a base-only consumer is forced to
+    pick an overlay (or supply ``--namespace`` to kubectl) rather than
+    silently landing in a namespace that no manifest creates."""
     kustomization = _load_yaml(_BASE / "kustomization.yaml")
-    assert kustomization["namespace"] == "competitionops"
+    assert "namespace" not in kustomization, (
+        "base must not pin a namespace anymore — overlays own that. "
+        f"Got namespace={kustomization.get('namespace')!r}."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +288,103 @@ def test_each_overlay_targets_distinct_namespace() -> None:
 
 
 # ---------------------------------------------------------------------------
+# H1 regression guard — each overlay must actually CREATE the target
+# namespace it points at.
+#
+# Background: kustomize's ``namespace:`` field only rewrites the
+# ``metadata.namespace`` of namespaced resources. It does NOT rename a
+# ``Namespace`` kind. Before this fix, ``infra/k8s/base/namespace.yaml``
+# shipped ``Namespace/competitionops`` and the three overlays set
+# ``namespace: competitionops-{env}``. The rendered output therefore
+# declared the wrong namespace (``competitionops``) and tried to put
+# the Deployment / Service / PVC into ``competitionops-{env}`` which
+# was never created. ``kubectl apply -k overlays/dev/`` would fail.
+#
+# The fix moves the Namespace resource out of base. Each overlay ships
+# its own ``namespace.yaml`` declaring the matching ``Namespace`` kind.
+# These tests verify that contract WITHOUT requiring the kustomize CLI,
+# so they run in CI regardless of binary availability.
+# ---------------------------------------------------------------------------
+
+
+def _collect_namespace_resources_from_kustomization(
+    kustomization_dir: Path,
+) -> list[dict[str, Any]]:
+    """Walk a kustomization's ``resources:`` list (recursively into
+    referenced directories) and return every Namespace resource it
+    eventually contributes to the rendered output."""
+    kustomization = _load_yaml(kustomization_dir / "kustomization.yaml")
+    found: list[dict[str, Any]] = []
+    for entry in kustomization.get("resources", []) or []:
+        path = (kustomization_dir / entry).resolve()
+        if path.is_dir():
+            found.extend(_collect_namespace_resources_from_kustomization(path))
+            continue
+        if not path.is_file():
+            continue
+        for doc in _load_all_yaml(path):
+            if doc.get("kind") == "Namespace":
+                found.append(doc)
+    return found
+
+
+def test_each_overlay_declares_a_namespace_resource_matching_its_target() -> None:
+    """For every overlay, the rendered manifest set must include a
+    ``Namespace`` resource whose ``metadata.name`` equals the overlay's
+    ``namespace:`` field. Otherwise ``kubectl apply -k`` will try to
+    create namespaced resources before the namespace exists."""
+    for env in ("dev", "staging", "prod"):
+        overlay_dir = _OVERLAYS / env
+        target_ns = _load_yaml(overlay_dir / "kustomization.yaml")["namespace"]
+
+        namespaces = _collect_namespace_resources_from_kustomization(overlay_dir)
+        names = [ns["metadata"]["name"] for ns in namespaces]
+
+        assert target_ns in names, (
+            f"overlay {env!r} targets namespace {target_ns!r} but the "
+            f"rendered resources only declare {names!r}. Kustomize's "
+            "`namespace:` field does NOT rename Namespace kinds — each "
+            "overlay must ship its own namespace.yaml so the namespace "
+            "is actually created."
+        )
+
+
+def test_overlay_namespace_resources_carry_managed_by_kustomize_label() -> None:
+    """Sanity: the per-overlay namespace.yaml files should label the
+    Namespace consistently with what base used to ship, so observability
+    tooling (ArgoCD, Lens, etc.) keeps recognising it."""
+    for env in ("dev", "staging", "prod"):
+        local_ns_path = _OVERLAYS / env / "namespace.yaml"
+        # Existence is asserted by the previous test indirectly (no
+        # base namespace.yaml exists after the fix), but make it
+        # explicit here for a clearer failure message.
+        assert local_ns_path.exists(), (
+            f"overlays/{env}/namespace.yaml must exist — base no longer "
+            "ships a Namespace resource."
+        )
+        doc = _load_yaml(local_ns_path)
+        assert doc["kind"] == "Namespace"
+        assert doc["metadata"]["name"] == f"competitionops-{env}"
+        labels = doc["metadata"].get("labels", {})
+        assert labels.get("app.kubernetes.io/name") == "competitionops"
+
+
+def test_base_no_longer_ships_a_namespace_resource() -> None:
+    """Base must not declare a Namespace anymore — that responsibility
+    moved into the overlays so each env owns its target namespace."""
+    base_ns = _BASE / "namespace.yaml"
+    assert not base_ns.exists(), (
+        f"{base_ns} should have been removed in the H1 fix. Keeping "
+        "it here creates an extra `Namespace/competitionops` resource "
+        "in every overlay's rendered output that the env never uses."
+    )
+    base_kust = _load_yaml(_BASE / "kustomization.yaml")
+    assert "namespace.yaml" not in (base_kust.get("resources") or []), (
+        "base/kustomization.yaml still lists namespace.yaml; remove it."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dockerfile — distroless multi-stage + nonroot
 # ---------------------------------------------------------------------------
 
@@ -320,3 +427,18 @@ def test_kustomize_build_succeeds_on_every_overlay() -> None:
             f"kustomize build failed for {overlay}: {result.stderr}"
         )
         assert "kind: Deployment" in result.stdout
+        # H1 — rendered output must declare a Namespace whose name
+        # matches the overlay's ``namespace:`` field. The pure-YAML
+        # test above asserts this from the source files; this test
+        # double-checks it through the real kustomize renderer.
+        target_ns = f"competitionops-{overlay}"
+        rendered_docs = list(yaml.safe_load_all(result.stdout))
+        ns_names = [
+            d["metadata"]["name"]
+            for d in rendered_docs
+            if d and d.get("kind") == "Namespace"
+        ]
+        assert target_ns in ns_names, (
+            f"overlay {overlay}: kustomize rendered Namespace names "
+            f"{ns_names!r}, expected {target_ns!r}."
+        )

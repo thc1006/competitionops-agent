@@ -156,22 +156,33 @@ exercised both individually and as a composed pipeline.
 
 ### P2-003 — Kubernetes deployment
 
-Status: **Done (2026-05-14)** — Kustomize base (namespace + deployment
-+ service + configmap + secret.template + pvc) plus three overlays
-(dev / staging / prod). Hardened pod posture: distroless
-``python3-debian12:nonroot`` image, uid 65532, dropped ALL caps,
-read-only root fs, automountServiceAccountToken=false, RuntimeDefault
-seccomp, readinessProbe on ``/health`` + livenessProbe on
-``/healthz``. PVC ``competitionops-audit`` (5Gi RWX) backs Tier 0 #4's
-``AUDIT_LOG_DIR``; dev overlay swaps PVC for emptyDir for minikube /
-kind without RWX. Prod overlay: 3 replicas + podAntiAffinity + nginx
-ingress with cert-manager letsencrypt-prod + 20rps rate limit.
+Status: **Done (2026-05-14)** — Kustomize base (deployment + service +
+configmap + secret.template + pvc) plus three overlays (dev / staging /
+prod), each shipping its own ``namespace.yaml``. Hardened pod posture:
+distroless ``python3-debian12:nonroot`` image, uid 65532, dropped ALL
+caps, read-only root fs, automountServiceAccountToken=false,
+RuntimeDefault seccomp, readinessProbe on ``/health`` + livenessProbe
+on ``/healthz``. PVC ``competitionops-audit`` (5Gi RWX) backs Tier 0
+#4's ``AUDIT_LOG_DIR``; dev overlay swaps PVC for emptyDir for
+minikube / kind without RWX. Prod overlay: 3 replicas + podAntiAffinity
++ nginx ingress with cert-manager letsencrypt-prod + 20rps rate limit.
 Staging: same shape with letsencrypt-staging. ``secret.template.yaml``
 ships with seven empty key placeholders — real values flow via
 external-secrets / sealed-secrets / kubectl. Multi-stage Dockerfile
-builds with uv into a distroless runtime. 28 manifest tests parse YAML
-directly (no kustomize CLI dep), 29th smoke test calls
+builds with uv into a distroless runtime. 30 manifest tests parse YAML
+directly (no kustomize CLI dep), 31st smoke test calls
 ``kustomize build`` per overlay if the binary is available.
+
+**H1 (2026-05-14) closed** — Each overlay now ships its own
+``namespace.yaml`` declaring ``Namespace/competitionops-{env}``. Base
+no longer ships a Namespace resource or pins a default namespace.
+Previously the base's ``Namespace/competitionops`` was the ONLY
+Namespace rendered into every overlay (because kustomize's
+``namespace:`` field cannot rename a Namespace kind — it only rewrites
+``metadata.namespace`` on namespaced resources), so
+``kubectl apply -k overlays/dev/`` would create
+``Namespace/competitionops`` and then fail to place the Deployment
+into ``competitionops-dev`` which never got created.
 
 ### P2-004 — Observability with OpenTelemetry
 
