@@ -314,6 +314,44 @@ async def test_real_execute_maps_network_error_to_failed_result() -> None:
     assert "SECRET-TOKEN" not in err
 
 
+@pytest.mark.asyncio
+async def test_real_execute_maps_invalid_url_to_failed_result() -> None:
+    """Round-3 M4: ``httpx.InvalidURL`` is NOT a subclass of
+    ``httpx.HTTPError`` (verified at module import below). Before the
+    fix the existing ``except httpx.HTTPError`` clause let
+    ``InvalidURL`` propagate uncaught out of ``execute()`` and the
+    request handler returned a 500 whose stack trace included the
+    raw bad URL — and ``str(httpx.InvalidURL)`` typically echoes the
+    URL fragment that broke parsing, which embeds user-controlled
+    action title / workspace_slug content. Treat it identically to a
+    ConnectError: return ``failed`` with the class name only.
+    """
+    # Sanity check — if upstream httpx ever makes InvalidURL inherit
+    # from HTTPError this test (and the M4 fix) become redundant.
+    assert not issubclass(httpx.InvalidURL, httpx.HTTPError), (
+        "Upstream httpx changed: InvalidURL now inherits from "
+        "HTTPError. The M4 fix can be reverted — re-evaluate."
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # The leak surface in the wild: a bad URL component containing
+        # what looks like a copy-pasted secret.
+        raise httpx.InvalidURL("bad url: SECRET-IN-URL-PATH")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(_make_action(), dry_run=False)
+
+    assert result.status == "failed"
+    assert "InvalidURL" in (result.error or "")
+    err = result.error or ""
+    # Leak surface: the URL fragment that ended up in the exception
+    # message must NOT appear in the audit field.
+    assert "SECRET-IN-URL-PATH" not in err
+    assert "bad url" not in err
+
+
 # ---------------------------------------------------------------------------
 # C1 — dry_run safety in real mode
 #

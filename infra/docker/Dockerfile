@@ -22,9 +22,19 @@ RUN pip install --no-cache-dir "uv>=0.11"
 # (real layout-aware PDF extraction). Default build leaves it empty,
 # so the image stays slim. Operators flipping ``PDF_ADAPTER=docling``
 # at runtime MUST also build with this arg or the runtime factory
-# raises ``RuntimeError`` at the first PDF upload:
+# raises ``RuntimeError`` at the first PDF upload.
 #
-#   docker build --build-arg INCLUDE_OCR=1 -t competitionops:ocr \
+# Round-3 M3 — image tag must match the kustomize overlay's
+# ``newName: competitionops/api`` so ``kubectl apply -k overlays/<env>``
+# resolves the image without an extra ``kustomize edit set image``.
+# Slim build:
+#
+#   docker build -t competitionops/api:<env> -f infra/docker/Dockerfile .
+#
+# OCR build (Docling enabled):
+#
+#   docker build --build-arg INCLUDE_OCR=1 \
+#       -t competitionops/api:<env>-ocr \
 #       -f infra/docker/Dockerfile .
 #
 # The ``${INCLUDE_OCR:+--extra ocr}`` shell expansion adds the flag

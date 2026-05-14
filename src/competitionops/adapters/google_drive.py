@@ -298,13 +298,20 @@ class GoogleDriveAdapter:
                 error=safe_error_summary(exc.response, target="drive"),
                 message="Drive REST returned an error status.",
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             # Round-2 M8 — ``str(exc)`` in httpx exceptions typically
             # embeds the request URL, and Drive's search URL embeds
             # ``q=name='<folder_name>'``. A copy-pasted secret in a
             # folder name would leak via that branch.
             # ``safe_network_summary`` keeps the class name (operator
             # signal) and drops the body entirely.
+            #
+            # Round-3 M4 — ``httpx.InvalidURL`` does NOT subclass
+            # ``httpx.HTTPError`` (parent is plain ``Exception``).
+            # Without this tuple-catch, a folder name that broke URL
+            # parsing (raw newlines, control characters) raised
+            # ``InvalidURL`` uncaught, leaking the URL chunk via the
+            # FastAPI 500 traceback.
             return ExternalActionResult(
                 action_id=action.action_id,
                 target_system="google_drive",

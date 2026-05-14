@@ -72,11 +72,20 @@ def safe_error_summary(
 
 
 def safe_network_summary(
-    exc: httpx.HTTPError, *, target: str | None = None
+    exc: httpx.HTTPError | httpx.InvalidURL, *, target: str | None = None
 ) -> str:
-    """Audit-safe summary of an ``httpx.HTTPError`` that is NOT a
-    ``HTTPStatusError`` (e.g. ``ConnectError``, ``ReadTimeout``,
-    ``WriteError``, ``RemoteProtocolError``).
+    """Audit-safe summary of a network-layer httpx exception.
+
+    Accepts both ``httpx.HTTPError`` (parent of ``ConnectError``,
+    ``ReadTimeout``, ``WriteError``, ``RemoteProtocolError``, …) AND
+    ``httpx.InvalidURL`` — which sits OUTSIDE the ``HTTPError``
+    hierarchy in httpx (parent is plain ``Exception``). Round-3 M4
+    closed the gap where adapters caught only ``HTTPError`` and let
+    ``InvalidURL`` propagate uncaught, leaking the bad-URL fragment
+    via the FastAPI 500 traceback. The leak surface is the same as
+    M8's: ``str(httpx.InvalidURL)`` typically echoes the URL chunk
+    that broke parsing, and that chunk embeds user content (folder
+    names / issue titles / workspace_slug).
 
     Returns ``"{target} network error: {ExceptionClassName}"`` and
     DELIBERATELY drops ``str(exc)``. Round-2 M8 — httpx's exception

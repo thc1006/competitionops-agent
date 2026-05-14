@@ -340,13 +340,22 @@ class PlaneAdapter:
                 error=safe_error_summary(exc.response, target="plane"),
                 message="Plane REST returned an error status.",
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             # Round-2 M8 — ``str(exc)`` in httpx exceptions typically
             # embeds the request URL, and Plane's search URL embeds
             # ``search=<issue_title>``. A copy-pasted secret in a title
             # would leak via that branch. ``safe_network_summary``
             # keeps the class name (operator signal) and drops the
             # body entirely.
+            #
+            # Round-3 M4 — ``httpx.InvalidURL`` does NOT inherit from
+            # ``httpx.HTTPError``; it sits on plain ``Exception``. Before
+            # this widening the ``InvalidURL`` raised by httpx on a
+            # malformed URL (e.g. user-supplied workspace_slug with raw
+            # newlines) propagated uncaught out of ``execute`` — the
+            # FastAPI handler then echoed the URL fragment into its 500
+            # response, re-introducing the M8 leak through a different
+            # exception. Tuple-catch closes both at once.
             return ExternalActionResult(
                 action_id=action.action_id,
                 target_system="plane",
