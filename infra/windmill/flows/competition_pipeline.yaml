@@ -1,0 +1,169 @@
+# Windmill flow: CompetitionOps brief → plan → approve → execute pipeline.
+#
+# Imports the three Python scripts under ``infra/windmill/scripts/`` and
+# chains them with a human-input gate where the PM picks which
+# action_ids to approve.
+#
+# Expected env:
+#   WINDMILL_API_BASE  default http://localhost:8000
+#                      override to the CompetitionOps FastAPI URL in
+#                      Windmill's "Variables" section.
+#
+# To import: in Windmill UI -> "Flows" -> "New flow" -> "Raw editor" ->
+# paste this YAML. Adjust the rawscript `content` blocks if your
+# Windmill version uses a different inline-script syntax (this YAML is
+# pinned against Windmill ≥ 1.250 / dialect v1).
+
+summary: CompetitionOps end-to-end dry-run pipeline
+description: >
+  Run a competition brief through the CompetitionOps Agent: extract,
+  plan, pause for PM approval selection, then approve + execute via
+  the mock adapters. Every step is dry-run-first; no real Google /
+  Plane / Calendar write happens unless those adapters have been
+  configured for real mode (see Settings.{plane_*, google_oauth_*}).
+
+value:
+  modules:
+    # ----- Module a: extract brief -----------------------------------
+    - id: a
+      summary: Extract a structured competition brief from raw text.
+      value:
+        type: rawscript
+        language: python3
+        content: |
+          import httpx
+          import os
+
+          def main(content: str, source_uri: str = None) -> dict:
+              if not content:
+                  raise ValueError("content must be a non-empty string")
+              api_base = os.environ.get("WINDMILL_API_BASE", "http://localhost:8000")
+              body = {"source_type": "text", "content": content}
+              if source_uri is not None:
+                  body["source_uri"] = source_uri
+              with httpx.Client(base_url=api_base, timeout=30.0) as client:
+                  response = client.post("/briefs/extract", json=body)
+                  response.raise_for_status()
+                  return response.json()
+        input_transforms:
+          content:
+            type: javascript
+            expr: flow_input.content
+          source_uri:
+            type: javascript
+            expr: flow_input.source_uri ?? null
+
+    # ----- Module b: generate plan -----------------------------------
+    - id: b
+      summary: Generate a dry-run ActionPlan from the brief.
+      value:
+        type: rawscript
+        language: python3
+        content: |
+          import httpx
+          import os
+
+          def main(competition: dict, team_capacity: list = None,
+                   pm_approval_required: bool = True) -> dict:
+              if not isinstance(competition, dict) or not competition.get("name"):
+                  raise ValueError("competition must be a CompetitionBrief dict with a name")
+              api_base = os.environ.get("WINDMILL_API_BASE", "http://localhost:8000")
+              body = {
+                  "competition": competition,
+                  "team_capacity": team_capacity or [],
+                  "preferences": {"pm_approval_required": pm_approval_required},
+              }
+              with httpx.Client(base_url=api_base, timeout=30.0) as client:
+                  response = client.post("/plans/generate", json=body)
+                  response.raise_for_status()
+                  return response.json()
+        input_transforms:
+          competition:
+            type: javascript
+            expr: results.a
+          team_capacity:
+            type: javascript
+            expr: flow_input.team_capacity ?? []
+          pm_approval_required:
+            type: static
+            value: true
+
+    # ----- Module c: PM approval suspend -----------------------------
+    # PM looks at results.b (the plan), picks the approved_action_ids,
+    # and resumes the flow. Windmill renders a form built from this
+    # module's static result shape.
+    - id: c
+      summary: PM picks which action_ids to approve.
+      value:
+        type: identity
+        flow_step_id: c
+      suspend:
+        required_events: 1
+        timeout: 604800  # 7 days
+        resume_form:
+          schema:
+            type: object
+            required: [approved_action_ids, approved_by]
+            properties:
+              approved_action_ids:
+                type: array
+                items:
+                  type: string
+                description: action_ids the PM chose to approve
+              approved_by:
+                type: string
+                description: PM identifier (typically an email)
+
+    # ----- Module d: approve & execute -------------------------------
+    - id: d
+      summary: Approve selected actions and execute through mock adapters.
+      value:
+        type: rawscript
+        language: python3
+        content: |
+          import httpx
+          import os
+
+          def main(plan_id: str, approved_action_ids: list,
+                   approved_by: str) -> dict:
+              if not plan_id or not approved_by:
+                  raise ValueError("plan_id and approved_by are required")
+              api_base = os.environ.get("WINDMILL_API_BASE", "http://localhost:8000")
+              body = {
+                  "approved_action_ids": approved_action_ids or [],
+                  "approved_by": approved_by,
+              }
+              with httpx.Client(base_url=api_base, timeout=60.0) as client:
+                  response = client.post(f"/plans/{plan_id}/approve", json=body)
+                  response.raise_for_status()
+                  return response.json()
+        input_transforms:
+          plan_id:
+            type: javascript
+            expr: results.b.plan_id
+          approved_action_ids:
+            type: javascript
+            expr: results.c.approved_action_ids
+          approved_by:
+            type: javascript
+            expr: results.c.approved_by
+
+# Flow-level input contract:
+#   content:        str  — raw competition brief text (required)
+#   source_uri:     str  — provenance label (optional)
+#   team_capacity:  list — TeamMember dicts (optional, defaults to [])
+schema:
+  type: object
+  required: [content]
+  properties:
+    content:
+      type: string
+      description: Raw competition brief text
+    source_uri:
+      type: string
+      description: Provenance label, e.g. drive://abc123 or test://demo
+    team_capacity:
+      type: array
+      items:
+        type: object
+      description: List of TeamMember dicts

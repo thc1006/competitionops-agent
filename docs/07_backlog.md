@@ -120,6 +120,17 @@ restart"). Production deployments can swap the saver for
 
 ### P2-002 — Windmill workflow scripts
 
+Status: **Done (2026-05-14)** — Three Windmill rawscripts under
+``infra/windmill/scripts/`` (extract_brief / generate_plan /
+approve_and_execute), each ``def main(...) -> dict`` reading
+``WINDMILL_API_BASE`` from env. A flow YAML under
+``infra/windmill/flows/competition_pipeline.yaml`` chains them with a
+``suspend`` step where the PM picks ``approved_action_ids`` (7-day
+timeout). README walks through importing the flow into a local
+Windmill instance. 8 tests use ``httpx.MockTransport`` + ``TestClient``
+so pytest never opens a real socket and all three scripts are
+exercised both individually and as a composed pipeline.
+
 ### P2-003 — Kubernetes deployment
 
 ### P2-004 — Observability with OpenTelemetry
