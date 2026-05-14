@@ -373,7 +373,14 @@ class PlaneAdapter:
 
         The external_id is hashed off the title so the same plan
         produces a stable preview id across re-runs — handy for the
-        approval UI showing PMs which issue would be created."""
+        approval UI showing PMs which issue would be created.
+
+        Cross-adapter contract — Drive's ``_dry_run_preview`` shares
+        the same shape, and ``tests/test_dry_run_contract.py`` pins
+        the contract (status, id prefix, None URL, message suffix).
+        Any change to the format below must be paired with the test
+        update; a drift would fail CI and surface during PR review.
+        """
         preview_id = f"dry_run_{_hash(title)}"
         return ExternalActionResult(
             action_id=action.action_id,

@@ -247,3 +247,40 @@ def test_file_plan_repository_satisfies_plan_repository_port(
     # list_all is on the Protocol so the MCP server can call
     # _plan_repo().list_all() against either adapter.
     assert len(repo.list_all()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round-2 L4 — N=100 scale smoke. ``list_all`` opens + parses every
+# JSON in ``base_dir`` per call. Establishes a baseline that 100
+# plans round-trip cleanly so a future *correctness* regression
+# (drops files, mis-parses ids) surfaces in CI.
+#
+# Caveat — this is NOT a performance assertion. 100 file opens take
+# milliseconds even on degraded I/O paths; a future O(N²) bug would
+# still finish ~fast at N=100. Time-bound assertions are flaky in CI
+# so we deliberately don't add one. If the I/O pattern becomes a
+# real prod concern, the right fix is to add a streaming
+# ``list_all(limit=N)`` overload to the Port, not to make the
+# baseline test flaky.
+# ---------------------------------------------------------------------------
+
+
+def test_file_plan_repository_list_all_handles_n_100_round_trip(
+    tmp_path: Path,
+) -> None:
+    """100 plans → save → list_all → all present, ids unique."""
+    repo = FilePlanRepository(base_dir=tmp_path)
+
+    for index in range(100):
+        repo.save(_plan(plan_id=f"plan_scale_{index:03d}"))
+
+    plans = repo.list_all()
+    assert len(plans) == 100
+    seen = {p.plan_id for p in plans}
+    expected = {f"plan_scale_{i:03d}" for i in range(100)}
+    assert seen == expected, (
+        f"missing plans at N=100; diff = {expected - seen!r}"
+    )
+    # Sanity check the on-disk shape: exactly N files, all .json.
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 100

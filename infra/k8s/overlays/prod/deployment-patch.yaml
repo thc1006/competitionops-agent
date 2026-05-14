@@ -14,10 +14,12 @@ spec:
   #
   # Both halves of the dependency are now shipped in-tree:
   #
-  #   1. ``FilePlanRepository`` — opted in via
-  #      ``PLAN_REPO_DIR=/path/on/the/shared/volume`` (mirrors Tier 0
-  #      #4's ``AUDIT_LOG_DIR``). Atomic-rename save means multi-pod
-  #      readers see only complete files.
+  #   1. ``FilePlanRepository`` — opted in via ``PLAN_REPO_DIR``
+  #      (commented placeholder in ``base/configmap.yaml`` points at
+  #      ``/var/lib/competitionops/audit/plans`` — a SUBDIR of the
+  #      existing audit PVC mount so lifting this pin needs zero new
+  #      infra). Atomic-rename save means multi-pod readers see only
+  #      complete files. Mirrors Tier 0 #4's ``AUDIT_LOG_DIR``.
   #   2. H3 closed — ``FileAuditLog`` now writes to
   #      ``<plan_id>.<writer_id>.jsonl`` (writer_id defaults to the
   #      pod's hostname / ``metadata.name``), so each pod owns its

@@ -43,6 +43,7 @@ import json
 import os
 from pathlib import Path
 
+from competitionops.adapters._path_utils import sanitise_filename_segment
 from competitionops.schemas import ActionPlan
 
 
@@ -100,18 +101,8 @@ class FilePlanRepository:
         safe = self._sanitise(plan_id)
         return self.base_dir / f"{safe}.json"
 
-    @staticmethod
-    def _sanitise(plan_id: str) -> str:
-        """Map plan_id to a safe filename stem.
-
-        Hash-based plan_ids only contain ``[A-Za-z0-9_]`` so this is a
-        no-op for legitimate values. Anything else (``/``, ``.``, ``\\``,
-        whitespace, control chars) gets folded to ``_`` so a malformed
-        id can never escape ``base_dir`` via path traversal. ``.`` is
-        intentionally NOT in the allowed set — ``..`` as a filename
-        component is the dangerous pattern.
-        """
-        cleaned = "".join(
-            char if char.isalnum() or char in "-_" else "_" for char in plan_id
-        )
-        return cleaned or "_"
+    # See ``_path_utils.sanitise_filename_segment`` for the canonical
+    # helper (round-2 L3). ``staticmethod`` alias keeps back-compat
+    # for ``FilePlanRepository._sanitise(...)`` call sites + monkey-
+    # patch in tests.
+    _sanitise = staticmethod(sanitise_filename_segment)

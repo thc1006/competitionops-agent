@@ -326,7 +326,14 @@ class GoogleDriveAdapter:
 
         The external_id is hashed off the folder name so the same plan
         produces a stable preview id across re-runs — useful for the
-        approval UI showing PMs which folder will be created."""
+        approval UI showing PMs which folder will be created.
+
+        Cross-adapter contract — Plane's ``_dry_run_preview`` shares
+        the same shape, and ``tests/test_dry_run_contract.py`` pins
+        the contract (status, id prefix, None URL, message suffix).
+        Any change to the format below must be paired with the test
+        update; a drift would fail CI and surface during PR review.
+        """
         name = (
             action.payload.get("folder_name")
             or action.payload.get("competition_name")
