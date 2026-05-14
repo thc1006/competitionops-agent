@@ -14,6 +14,16 @@ class PlanRepository(Protocol):
 
     def get(self, plan_id: str) -> ActionPlan | None: ...
 
+    def list_all(self) -> list[ActionPlan]:
+        """Return every saved plan as a snapshot.
+
+        Called by the MCP ``preview_external_actions`` flow when no
+        explicit ``plan_id`` is supplied. Both InMemory and File
+        implementations satisfy this, so MCP can call
+        ``_plan_repo().list_all()`` against either backend.
+        """
+        ...
+
 
 class AuditLogPort(Protocol):
     def append(self, record: AuditRecord) -> None: ...

@@ -5,18 +5,25 @@ metadata:
 spec:
   # H2 — Pinned to 1 replica.
   #
-  # ``_plan_repo()`` in ``src/competitionops/main.py`` is a singleton
-  # over ``InMemoryPlanRepository`` (a process-bound dict). With >1 pod
-  # a plan created on pod A is invisible to pod B, so
-  # ``POST /plans/{plan_id}/approve`` returns 404 whenever the LB lands
-  # the approval request on a different pod than the one that handled
-  # ``POST /plans/generate``.
+  # ``_plan_repo()`` in ``src/competitionops/main.py`` defaults to
+  # ``InMemoryPlanRepository`` (a process-bound dict). With >1 pod and
+  # the in-memory adapter, a plan created on pod A is invisible to
+  # pod B, so ``POST /plans/{plan_id}/approve`` returns 404 whenever
+  # the LB lands the approval on a different pod than the one that
+  # handled ``POST /plans/generate``.
   #
-  # To lift this pin, ship a shared-state ``PlanRepository`` adapter
-  # (SQLite-on-PVC, Postgres, or Redis) wired into ``_plan_repo`` via
-  # the same env-driven switch ``_audit_log`` uses for Tier 0 #4. Once
-  # operators set the relevant env var, this replicas line can go back
-  # to 3 and ``podAntiAffinity`` below starts doing real work.
+  # The ``FilePlanRepository`` adapter is now shipped — operators can
+  # opt in by mounting a shared volume and setting
+  # ``PLAN_REPO_DIR=/path/on/the/shared/volume`` (mirrors Tier 0 #4's
+  # ``AUDIT_LOG_DIR``). HOWEVER, lifting this pin ALSO requires the H3
+  # fix (multi-writer safety for ``FileAuditLog`` appends — currently
+  # dormant because replicas=1 means a single writer). Bumping
+  # replicas WITHOUT H3 in place will torn-write the JSONL audit log
+  # under concurrent execution. The pin stays at 1 until BOTH:
+  #   1. Operators have wired PLAN_REPO_DIR onto a shared volume.
+  #   2. H3 is closed (FileAuditLog flock or per-pod filenames).
+  # Once both are in place, this number can go back to 3 and the
+  # ``podAntiAffinity`` block below starts doing real work.
   replicas: 1
   template:
     spec:

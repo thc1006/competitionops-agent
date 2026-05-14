@@ -197,6 +197,20 @@ Inline comments at ``infra/k8s/overlays/prod/deployment-patch.yaml`` +
 ``src/competitionops/main.py::_plan_repo`` cross-reference the
 dependency so it can't get silently bumped.
 
+**H2 follow-up (2026-05-14, capability shipped)** —
+``FilePlanRepository`` adapter lands under
+``src/competitionops/adapters/file_plan_store.py``: one JSON file per
+``plan_id``, atomic-rename save (``os.replace``) so multi-pod readers
+on a shared volume see either the old complete file or the new
+complete file — never a partial. ``_plan_repo()`` in both
+``main.py`` and ``competitionops_mcp/server.py`` honors
+``Settings.plan_repo_dir`` (env ``PLAN_REPO_DIR``), mirroring how the
+audit log honors ``AUDIT_LOG_DIR`` (Tier 0 #4). 16 new tests cover
+round-trip / overwrite / list_all / atomic-rename / path-traversal
+sanitisation / two-instance cross-pod simulation / FastAPI full
+lifecycle with simulated pod restart. **Pin stays at replicas=1** —
+lifting it also requires the H3 audit-log multi-writer fix.
+
 ### P2-004 — Observability with OpenTelemetry
 
 Status: **In Progress** — Sprint 0 (tracer bootstrap) ✅, Sprint 2

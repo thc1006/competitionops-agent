@@ -244,27 +244,26 @@ def test_overlay_staging_uses_base_pvc_unchanged() -> None:
 def test_overlay_prod_pinned_to_one_replica_until_shared_plan_repo_lands() -> None:
     """H2 regression guard.
 
-    Prod overlay is pinned to ``replicas: 1`` because ``_plan_repo()`` in
-    ``src/competitionops/main.py`` is an ``@lru_cache(maxsize=1)``
-    singleton wrapping ``InMemoryPlanRepository`` — a process-bound
-    ``dict[str, ActionPlan]``. With >1 pod, a plan created on pod A is
-    invisible to pod B, so ``POST /plans/{plan_id}/approve`` returns
-    404 ``PlanNotFoundError`` whenever the LB lands the request on a
-    different pod than the one that created the plan.
+    Prod overlay is pinned to ``replicas: 1``. As of the shared-plan-repo
+    PR, ``FilePlanRepository`` (file-backed, atomic-rename save, opted
+    in via ``PLAN_REPO_DIR``) ships in-tree and closes half the H2
+    dependency. The OTHER half is H3 — multi-writer safety for the
+    ``FileAuditLog`` JSONL appends, which is still dormant while
+    replicas=1. The pin therefore stays at 1 until BOTH:
 
-    To lift this gate we need a real shared-state ``PlanRepository``
-    adapter (SQLite-on-PVC, Postgres, or Redis) wired into ``_plan_repo``
-    via the same env-driven switch ``_audit_log`` uses (Tier 0 #4).
+    1. The operator has wired ``PLAN_REPO_DIR`` onto a shared volume.
+    2. H3 is closed (``fcntl.flock`` around appends, or per-pod
+       filenames).
 
     The ``podAntiAffinity`` block stays in the patch so the spread
-    intent survives across the temporary 1-replica window; it's a no-op
-    while replicas=1 but lights up immediately the moment replicas is
-    bumped.
+    intent survives this temporary 1-replica window; it's a no-op now
+    but lights up immediately when replicas is bumped.
     """
     patch = _load_yaml(_OVERLAYS / "prod" / "deployment-patch.yaml")
     assert patch["spec"]["replicas"] == 1, (
-        "Prod must stay at replicas=1 until a shared PlanRepository "
-        "implementation lands. See H2 comment in this test for context."
+        "Prod must stay at replicas=1 until BOTH PLAN_REPO_DIR is "
+        "wired on a shared volume AND H3 (audit-log multi-writer "
+        "safety) is closed. See H2 comment in this test for context."
     )
     affinity = patch["spec"]["template"]["spec"]["affinity"]
     assert "podAntiAffinity" in affinity

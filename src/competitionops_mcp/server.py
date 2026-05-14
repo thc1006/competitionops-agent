@@ -27,11 +27,12 @@ from typing import Any
 from pathlib import Path
 
 from competitionops.adapters.file_audit import FileAuditLog
+from competitionops.adapters.file_plan_store import FilePlanRepository
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import get_settings
-from competitionops.ports import AuditLogPort
+from competitionops.ports import AuditLogPort, PlanRepository
 from competitionops.schemas import CompetitionBrief
 from competitionops.services.brief_extractor import BriefExtractor
 from competitionops.services.execution import ExecutionService, PlanNotFoundError
@@ -71,7 +72,16 @@ _GOOGLE_TARGETS: tuple[str, ...] = (
 
 
 @lru_cache(maxsize=1)
-def _plan_repo() -> InMemoryPlanRepository:
+def _plan_repo() -> PlanRepository:
+    """Plan repository singleton — mirrors the FastAPI side.
+
+    Honors ``Settings.plan_repo_dir`` (typically env ``PLAN_REPO_DIR``)
+    to switch between persistent ``FilePlanRepository`` and ephemeral
+    ``InMemoryPlanRepository`` (H2 follow-up).
+    """
+    plan_dir = get_settings().plan_repo_dir
+    if plan_dir:
+        return FilePlanRepository(base_dir=Path(plan_dir))
     return InMemoryPlanRepository()
 
 
