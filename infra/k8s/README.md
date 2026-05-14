@@ -102,15 +102,47 @@ so in-place upgrades keep the historical audit trail.
 
 ### Operator checklist to lift the pin
 
-1. Mount a shared RWX volume at a path of your choice (the existing
-   ``competitionops-audit`` PVC works; pick a different subdir or a
-   separate PVC for plans).
-2. Set ``PLAN_REPO_DIR=/path/on/that/volume`` via configmap or secret.
-3. Confirm your build is on top of the H3 fix
-   (``adapters/file_audit.py`` writes ``<plan_id>.<writer_id>.jsonl``).
-4. Edit ``overlays/prod/deployment-patch.yaml`` to bump replicas. The
+The four steps below assume your build is on top of the H3 fix
+(``adapters/file_audit.py`` writes ``<plan_id>.<writer_id>.jsonl``).
+Round-2 audit confirmed this is the only remaining gate.
+
+1. **Pick a shared volume for plans.** The existing
+   ``competitionops-audit`` PVC works as-is — plans go into a subdir
+   (``/var/lib/competitionops/audit/plans``), no second PVC, no second
+   ``volumeMount``. Operators with stricter quota isolation between
+   audit and plan data can provision a separate PVC + mount at a
+   distinct path.
+2. **Uncomment ``PLAN_REPO_DIR`` in** ``infra/k8s/base/configmap.yaml``.
+   The default value (subdir of the audit mount) is pre-written;
+   change the path only if step 1 picked a separate PVC.
+3. **Confirm H3 is in your build.** The audit-log layout under
+   ``competitionops-audit/`` should contain
+   ``<plan_id>.<pod-name>.jsonl`` files (one per pod). If you still
+   see ``<plan_id>.jsonl`` only, your image is pre-H3 — rebuild.
+4. **Bump replicas in** ``overlays/prod/deployment-patch.yaml``. The
    ``podAntiAffinity`` block is already in place to spread pods
-   across nodes.
+   across nodes; un-pin ``replicas: 1`` once the above is done.
+
+## Enabling Docling (real PDF extraction)
+
+P2-005 Sprint 3 ships ``DoclingPdfAdapter`` for layout-aware PDF
+parsing. The default image does NOT include Docling because its
+transitive deps (``torch``, ``easyocr``, ``pypdfium2``,
+``huggingface-hub``) add ~2 GiB to the image. Operators opt in at
+**build time** via a build-arg:
+
+```
+docker build --build-arg INCLUDE_OCR=1 \
+    -t competitionops:ocr \
+    -f infra/docker/Dockerfile .
+```
+
+Then at runtime, set ``PDF_ADAPTER=docling`` in the configmap (the
+commented placeholder is in ``infra/k8s/base/configmap.yaml``). The
+runtime factory verifies the package is importable; mismatched
+config (``PDF_ADAPTER=docling`` against a slim image) surfaces as a
+clear ``RuntimeError`` at the first PDF upload pointing at
+``--build-arg INCLUDE_OCR=1``.
 
 ## Secrets
 

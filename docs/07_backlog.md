@@ -414,6 +414,27 @@ network-error tests upgraded — previously asserted ``"synthetic"
 in error`` (the exact leak surface); now assert the class name IS
 in the error AND the leak token is NOT.
 
+**Round-2 M3 + M4 (2026-05-15) closed** — operational gaps closing
+the H2-lift and Docling-deploy paths so operators don't discover
+missing wiring at first request. **M3**: ``infra/k8s/base/configmap.yaml``
+now ships commented ``PLAN_REPO_DIR`` (pointing at
+``/var/lib/competitionops/audit/plans``, a subdir of the existing
+audit PVC mount — zero infra change to lift the H2 pin) and
+``PDF_ADAPTER`` placeholders. The H2 operator checklist in
+``infra/k8s/README.md`` rewritten to name the configmap step and
+the H3-build verification step explicitly. **M4**:
+``infra/docker/Dockerfile`` exposes an ``INCLUDE_OCR`` build-arg
+(``${INCLUDE_OCR:+--extra ocr}`` shell expansion adds Docling only
+when non-empty). Default build stays slim; operators flipping
+``PDF_ADAPTER=docling`` build with ``docker build --build-arg
+INCLUDE_OCR=1 ...``. New README section "Enabling Docling" documents
+the build-arg + configmap pair. 7 new tests: 3 configmap placeholder
+guards (key in raw text, key NOT in active ``cm.data``, default path
+references the audit subdir), 2 Dockerfile structural guards
+(INCLUDE_OCR arg declared, default empty so slim build is preserved),
+2 README content guards (H2 checklist references configmap +
+INCLUDE_OCR pair).
+
 **M5 (2026-05-14) closed** — PDF upload handler now reads the body in
 1 MiB chunks and raises 413 the moment accumulated bytes overshoot
 the 10 MiB cap. Before this fix, ``contents = await file.read()`` with

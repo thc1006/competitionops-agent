@@ -17,9 +17,22 @@ RUN pip install --no-cache-dir "uv>=0.11"
 # at it. ``--extra otel`` pulls the production observability exporter
 # package; flip it off if you want a slimmer image and accept that
 # OTLP export silently no-ops.
+#
+# Round-2 M4 — ``INCLUDE_OCR`` build arg opts the image into Docling
+# (real layout-aware PDF extraction). Default build leaves it empty,
+# so the image stays slim. Operators flipping ``PDF_ADAPTER=docling``
+# at runtime MUST also build with this arg or the runtime factory
+# raises ``RuntimeError`` at the first PDF upload:
+#
+#   docker build --build-arg INCLUDE_OCR=1 -t competitionops:ocr \
+#       -f infra/docker/Dockerfile .
+#
+# The ``${INCLUDE_OCR:+--extra ocr}`` shell expansion adds the flag
+# only when ``INCLUDE_OCR`` is non-empty; default = slim image.
+ARG INCLUDE_OCR=""
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv pip install --no-cache --target /app/deps --extra otel .
+RUN uv pip install --no-cache --target /app/deps --extra otel ${INCLUDE_OCR:+--extra ocr} .
 
 # ----- Stage 2: distroless runtime -------------------------------------------
 FROM gcr.io/distroless/python3-debian12:nonroot
