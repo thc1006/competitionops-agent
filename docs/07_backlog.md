@@ -79,6 +79,55 @@ Acceptance:
 
 ### P1-001 — Google Docs real adapter
 
+Status: **Done (2026-05-15)** — Docs adapter upgraded from Sprint-0 stateful
+mock to mock-first + real-mode httpx-backed REST. Real mode activates
+when both ``Settings.google_oauth_access_token`` (SecretStr) and
+``Settings.google_docs_api_base`` are set (the base defaults to the prod
+Docs URL, so an operator providing only a bearer flips real mode on).
+Partial config — e.g. base URL override without a bearer — falls back to
+the deterministic mock so half-real behaviour can't surprise a PM.
+
+Real-mode operations:
+- ``google.docs.create_doc`` / ``google.docs.create_proposal_outline`` →
+  ``POST /v1/documents`` with body ``{"title": ...}``. When the action
+  payload carries ``sections``, follows with
+  ``POST /v1/documents/{documentId}:batchUpdate`` to insert each section
+  heading as a separate ``insertText`` at ``endOfSegmentLocation``.
+- ``google.docs.append_section`` → single ``insertText`` at
+  ``endOfSegmentLocation`` with heading + body.
+
+Deep-review C1 honored: real mode short-circuits ``dry_run=True`` to a
+synthetic ``dry_run_<sha1(key)[:8]>`` preview BEFORE any HTTP call.
+``Settings.dry_run_default=True`` is the hot path; silent writes would
+violate CLAUDE.md rule #3.
+
+Error redaction follows the Plane / Drive contract: HTTPStatusError →
+``safe_error_summary`` (M8, structured fields only, 200-char cap);
+``httpx.HTTPError`` + ``httpx.InvalidURL`` → ``safe_network_summary``
+(round-3 M4, class name only, ``str(exc)`` dropped). Document titles
+and batchUpdate bodies carry user content — leaking ``str(exc)`` would
+re-introduce M8 / M4.
+
+Out of scope: cross-API idempotency via Drive ``files.list`` (Docs API
+has no native name lookup; would couple this adapter to Drive auth
+scope + a parent_id the current ``ExternalAction`` payload doesn't
+carry). OAuth refresh stays operator-driven via the access-token
+field. 429 backoff deferred.
+
+The Stage-4 "no httpx in adapter source" guard relaxed to also exempt
+``google_docs`` (alongside ``google_drive`` from P1-005). Sheets and
+Calendar remain pure mocks until P1-002 / P1-003. The guard was
+tightened to use AST import inspection rather than substring grep
+because the Docs ``batchUpdate`` payload carries an upstream JSON key
+literally named ``"requests"``.
+
+Tests: 14 new in ``tests/test_docs_real_adapter.py`` covering real_mode
+toggle (3), create_doc endpoint + body + URL shape (4), batchUpdate
+section insertion (1), dry_run safety on both create + append (2),
+401 / network-error / InvalidURL redaction on create (3),
+network-error redaction on append (1). All use ``httpx.MockTransport``
+so the suite stays offline.
+
 ### P1-002 — Google Sheets real adapter
 
 ### P1-003 — Google Calendar real adapter
