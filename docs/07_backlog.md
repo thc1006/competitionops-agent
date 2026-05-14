@@ -1,5 +1,10 @@
 # 07 — Backlog
 
+> **Status snapshot (2026-05-14):** P0-001 through P0-006 are implemented,
+> tested (84 passed in 1.37s), and committed. P1 not started. P2-004 in
+> progress (Sprint 0+2+3 done). See `docs/10_p2_roadmap.md` for the active
+> P2 sprint sequence.
+
 ## P0
 
 ### P0-001 — Define core schemas
@@ -92,5 +97,13 @@ Acceptance:
 ### P2-003 — Kubernetes deployment
 
 ### P2-004 — Observability with OpenTelemetry
+
+Status: **In Progress** — Sprint 0 (tracer bootstrap) ✅, Sprint 2
+(ExecutionService root + adapter_call spans) ✅, Sprint 3 (root-span
+plan_id/actor attributes, adapter_call plan_id, result.status=failed →
+span STATUS=ERROR mapping, M1 OTel auto-exception coverage) ✅.
+
+Next: Sprint 4 — FastAPI auto-instrumentation + MCP tool spans. See
+`docs/10_p2_roadmap.md` for the full sprint sequence.
 
 ### P2-005 — Local OCR / layout parsing with GPU

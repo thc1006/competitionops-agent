@@ -1,0 +1,20 @@
+# Normalize all text files to LF line endings on checkout, regardless of
+# the host platform. Stops Windows clones from re-introducing CRLF that
+# would otherwise trip `git diff --check` (per Stage 7 finding M3).
+
+* text=auto eol=lf
+
+LICENSE   text eol=lf
+*.py      text eol=lf
+*.md      text eol=lf
+*.sh      text eol=lf
+*.toml    text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.json    text eol=lf
+*.lock    text eol=lf
+*.cfg     text eol=lf
+*.ini     text eol=lf
+
+# Treat lockfile as text but never auto-merge — re-run `uv lock` instead.
+uv.lock   text eol=lf merge=ours linguist-generated=true

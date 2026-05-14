@@ -71,6 +71,26 @@ def _traced_async(
 
     return decorator
 
+
+def _annotate_root_span(
+    *,
+    plan_id: str,
+    actor: str,
+    action_id: str | None = None,
+) -> None:
+    """Attach plan_id / actor (and optional action_id) onto the active root span.
+
+    Called at the top of each public ExecutionService method body. The
+    decorator above already opened the span, so ``trace.get_current_span()``
+    here returns that root span. NonRecording spans (no SDK provider) make
+    these set_attribute calls silent no-ops.
+    """
+    span = trace.get_current_span()
+    span.set_attribute("plan_id", plan_id)
+    span.set_attribute("actor", actor)
+    if action_id is not None:
+        span.set_attribute("action_id", action_id)
+
 FORBIDDEN_ACTION_TYPES: Final[frozenset[str]] = frozenset(
     {
         "google.drive.delete_file",
@@ -107,6 +127,7 @@ class ExecutionService:
         approved_by: str,
         allow_reexecute: bool = False,
     ) -> ApprovalResponse:
+        _annotate_root_span(plan_id=plan_id, actor=approved_by)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -170,6 +191,7 @@ class ExecutionService:
         wrong semantics when Claude wants to approve actions one at a time
         across multiple tool calls.
         """
+        _annotate_root_span(plan_id=plan_id, actor=approved_by, action_id=action_id)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -247,6 +269,7 @@ class ExecutionService:
         - Already-``executed`` actions are left untouched and surfaced as
           ``skipped`` in the decision so callers see the no-op explicitly.
         """
+        _annotate_root_span(plan_id=plan_id, actor=approved_by)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -321,6 +344,7 @@ class ExecutionService:
         set; any id whose action is not in ``approved`` status surfaces as
         ``skipped`` with a ``not approved`` message — never as ``executed``.
         """
+        _annotate_root_span(plan_id=plan_id, actor=executed_by)
         plan = self.plan_repo.get(plan_id)
         if plan is None:
             raise PlanNotFoundError(f"plan_id={plan_id!r} not found")
@@ -456,11 +480,19 @@ class ExecutionService:
                     "action_id": action.action_id,
                     "target_system": action.target_system,
                     "action_type": action.type,
+                    "plan_id": plan.plan_id,
                 },
             ):
                 result = await adapter.execute(
                     action, dry_run=self.settings.dry_run_default
                 )
+                if result.status == "failed":
+                    trace.get_current_span().set_status(
+                        trace.Status(
+                            trace.StatusCode.ERROR,
+                            result.error or "adapter returned failed",
+                        )
+                    )
         except Exception as exc:  # noqa: BLE001 — per-action isolation
             action.status = ActionStatus.failed
             error_msg = f"{type(exc).__name__}: {exc}"
@@ -609,11 +641,19 @@ class ExecutionService:
                     "action_id": action.action_id,
                     "target_system": action.target_system,
                     "action_type": action.type,
+                    "plan_id": plan.plan_id,
                 },
             ):
                 result = await adapter.execute(
                     action, dry_run=self.settings.dry_run_default
                 )
+                if result.status == "failed":
+                    trace.get_current_span().set_status(
+                        trace.Status(
+                            trace.StatusCode.ERROR,
+                            result.error or "adapter returned failed",
+                        )
+                    )
         except Exception as exc:  # noqa: BLE001 — adapter isolation per spec UC3 AC #3
             action.status = ActionStatus.failed
             error_msg = f"{type(exc).__name__}: {exc}"
