@@ -37,8 +37,8 @@ google = [
     "google-auth-oauthlib>=1.2.1"
 ]
 langgraph = [
-    "langgraph>=0.2.0",
-    "langchain>=0.3.0"
+    "langgraph>=0.5.0",
+    "langgraph-checkpoint>=2.0.0"
 ]
 otel = [
     "opentelemetry-exporter-otlp>=1.27.0"

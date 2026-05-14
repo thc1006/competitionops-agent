@@ -104,6 +104,20 @@ instances with search disabled still work.
 
 ### P2-001 — LangGraph workflow with human-in-the-loop
 
+Status: **Done (2026-05-14)** — Five-node ``StateGraph`` (extract → plan →
+approve → execute → audit) compiled with ``interrupt_before=["approve"]``
+and a ``MemorySaver`` checkpointer. Caller invokes the graph, gets a
+paused state after ``plan``, supplies ``approved_action_ids`` via
+``graph.update_state``, then resumes — at which point the existing
+``ExecutionService`` runs the approved actions through the mock-first
+adapter registry and ``audit_node`` snapshots the resulting audit
+records into final state. 11 tests cover state round-trip, each node's
+invariant, the interrupt behavior (zero adapter calls before resume),
+the post-approval execute + audit path, and ``MemorySaver`` persistence
+across graph reconstruction (same ``thread_id`` survives a "process
+restart"). Production deployments can swap the saver for
+``SqliteSaver`` / ``PostgresSaver`` without changing the graph shape.
+
 ### P2-002 — Windmill workflow scripts
 
 ### P2-003 — Kubernetes deployment
