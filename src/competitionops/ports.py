@@ -19,3 +19,17 @@ class AuditLogPort(Protocol):
     def append(self, record: AuditRecord) -> None: ...
 
     def list_for_plan(self, plan_id: str) -> list[AuditRecord]: ...
+
+
+class PdfIngestionPort(Protocol):
+    """Renders a PDF byte stream into plain text for the brief extractor.
+
+    Sprint 0-2 (P2-005): ``MockPdfAdapter`` is the only implementation
+    and treats the bytes after the ``%PDF-`` header as UTF-8 text.
+
+    Sprint 3 (P2-005): swap in a Docling-backed adapter that parses
+    real PDF layout. Both adapters MUST keep this signature so the
+    extractor never knows which engine produced the text.
+    """
+
+    def extract(self, pdf_bytes: bytes) -> str: ...
