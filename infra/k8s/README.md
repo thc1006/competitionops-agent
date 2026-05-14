@@ -127,17 +127,26 @@ Round-2 audit confirmed this is the only remaining gate.
    has its checkpoint in pod A's memory. ``POST /executions/{plan_id}/run``
    after approval routes by L7 hash to **any** pod, and pod B has no
    ``thread_id`` for that plan — the workflow either crashes on
-   resume or silently restarts from scratch. Pick one of:
-   - ``langgraph_checkpoint_sqlite.SqliteSaver`` against a shared
-     sqlite file on the audit PVC (RWX). Single file, simple, good
-     for low-throughput.
-   - ``langgraph_checkpoint_postgres.PostgresSaver`` against the
-     same PostgreSQL Sprint 7 provisions for plan persistence. Better
-     concurrency, requires a migration. ``langgraph-checkpoint`` is
-     already a dev dep — the SqliteSaver / PostgresSaver wheels ship
-     under separate optional extras when this step is taken.
-   Wire the chosen saver into ``build_graph(checkpointer=...)`` and
-   surface the choice via env (e.g. ``LANGGRAPH_CHECKPOINTER=sqlite``).
+   resume or silently restarts from scratch.
+
+   This step is a **code change**, not a deploy-time toggle —
+   merge it into a release before bumping replicas. Pick one
+   migration target:
+
+   - ``langgraph.checkpoint.sqlite.SqliteSaver`` (PyPI:
+     ``langgraph-checkpoint-sqlite``) against a shared sqlite file on
+     the audit PVC (RWX). Single file, simple, good for low-throughput.
+   - ``langgraph.checkpoint.postgres.PostgresSaver`` (PyPI:
+     ``langgraph-checkpoint-postgres``) against the same PostgreSQL
+     Sprint 7 will provision for plan persistence. Better concurrency,
+     requires a schema migration. Neither saver ships in
+     ``pyproject.toml`` today — add the chosen one as an optional
+     extra (mirroring ``[ocr]``) in the same PR that does the wiring.
+
+   Wire the chosen saver into ``build_graph(checkpointer=...)`` and,
+   when implemented, surface the choice via a Settings field /
+   env var (e.g. ``LANGGRAPH_CHECKPOINTER=sqlite``; this field
+   does not exist yet — Sprint 7 work).
 5. **Bump replicas in** ``overlays/prod/deployment-patch.yaml``. The
    ``podAntiAffinity`` block is already in place to spread pods
    across nodes; un-pin ``replicas: 1`` once the above is done.
