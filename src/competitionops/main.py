@@ -20,7 +20,11 @@ from competitionops.schemas import (
 from competitionops.services.brief_extractor import BriefExtractor
 from competitionops.services.execution import ExecutionService, PlanNotFoundError
 from competitionops.services.planner import CompetitionPlanner
-from competitionops.telemetry import setup_meter_provider, setup_tracer_provider
+from competitionops.telemetry import (
+    OtelInstallOrderError,
+    setup_meter_provider,
+    setup_tracer_provider,
+)
 
 
 # ----------------------------------------------------------------------
@@ -54,13 +58,31 @@ def _wire_otel_exporters() -> None:
 
     Both flags can be set simultaneously; processors stack.
     """
+    from opentelemetry import trace
     from opentelemetry.sdk.metrics.export import (
         MetricReader,
         PeriodicExportingMetricReader,
     )
+    from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-    tracer_provider = setup_tracer_provider()
+    # M2 — Module-init below already installed the SDK TracerProvider
+    # for FastAPI auto-instrumentation. We look it up via the global
+    # accessor (NOT a second ``setup_tracer_provider()`` call) so the
+    # ownership chain stays a single root: one install, one consumer.
+    # If the global is somehow not an SDK provider here (module-init
+    # bypassed, embedder swapped it), fail loudly — attaching span
+    # processors to a Proxy / NoOp provider is silent data loss.
+    tracer_provider = trace.get_tracer_provider()
+    if not isinstance(tracer_provider, TracerProvider):
+        raise OtelInstallOrderError(
+            "TracerProvider is not an SDK ``TracerProvider`` "
+            f"({type(tracer_provider).__name__}). Module-init at the "
+            "bottom of main.py must install one before this wiring "
+            "function runs. If an embedder replaced the provider, "
+            "they need to also call setup_tracer_provider() before "
+            "loading competitionops.main."
+        )
     metric_readers: list[MetricReader] = []
 
     if os.environ.get("COMPETITIONOPS_OTEL_CONSOLE") == "1":

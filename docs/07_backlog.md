@@ -307,6 +307,29 @@ explicitly opted in. ✅
 P2-004 main track complete. Remaining: optional polish (Sprint 6+
 metric attribute review, custom resource attributes for service.name).
 
+**M1 + M2 (2026-05-15) closed** — Two install-order footguns in the
+OTel bootstrap surfaced for the first time. M1: when a MeterProvider
+was already installed (e.g. ``tests/test_metrics.py``'s session
+fixture had run), ``setup_meter_provider(readers=[...])`` silently
+returned the existing provider and dropped the requested readers on
+the floor — OTel SDK has no API to add readers post-construction.
+``test_wire_otel_exporters_*_runs_without_error`` would pass while
+the OTLP / Console exporters were never wired. After the fix, that
+silent-drop branch raises ``OtelInstallOrderError`` with operator
+guidance. M2: ``main.py`` previously called ``setup_tracer_provider``
+twice (once at module-init, once inside ``_wire_otel_exporters``).
+The wiring path now uses ``trace.get_tracer_provider()`` with an
+isinstance check, so module-init is the single root of TracerProvider
+installation; if module-init was bypassed (or an embedder swapped in a
+non-SDK provider) the wiring raises rather than attaching span
+processors to a Proxy. 5 new tests cover: happy path + readers-on-
+empty-provider + readers-with-already-installed (raises) + AST
+structural guard that the wiring function no longer calls
+``setup_tracer_provider`` + isinstance failure raises. The two
+existing ``runs_without_error`` smoke tests upgraded to also assert
+the MeterProvider was actually installed (was passing for the wrong
+reason).
+
 ### P2-005 — Local OCR / layout parsing with GPU
 
 Status: **Sprint 0-2 Done (2026-05-14)** — ``PdfIngestionPort``
