@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: competitionops-staging
 
 resources:
+  - namespace.yaml
   - ../../base
   - ingress.yaml
 

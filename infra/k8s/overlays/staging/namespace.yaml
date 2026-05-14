@@ -1,7 +1,8 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: competitionops
+  name: competitionops-staging
   labels:
     app.kubernetes.io/name: competitionops
     app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/instance: staging

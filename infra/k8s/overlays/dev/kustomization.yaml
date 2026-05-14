@@ -4,6 +4,7 @@ kind: Kustomization
 namespace: competitionops-dev
 
 resources:
+  - namespace.yaml
   - ../../base
 
 # Dev: 1 replica, no PVC (emptyDir loses audit on restart but skips
