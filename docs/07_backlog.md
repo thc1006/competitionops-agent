@@ -235,3 +235,16 @@ since they don't carry a JSON schema (Sprint 2). 13 tests cover all
 three sprints. Sprints 3 (Docling real engine), 4 (GPU), and 5
 (Drive path) deferred — they need either ``--extra ocr`` or the
 not-yet-shipped P1-005 real Drive adapter.
+
+**M5 (2026-05-14) closed** — PDF upload handler now reads the body in
+1 MiB chunks and raises 413 the moment accumulated bytes overshoot
+the 10 MiB cap. Before this fix, ``contents = await file.read()`` with
+no size argument materialised the entire upload into a single Python
+``bytes`` object before the size check ran, so a Content-Length: 10 GiB
+client could OOM the pod even though the request was clearly
+oversized. Three regression tests guard the fix: a spy verifies the
+handler never calls ``read()`` without a positive size argument; a
+behavioural test sends a 15 MiB body and asserts the total bytes read
+stay under ``limit + 2 MiB`` chunk-overshoot allowance; a structural
+test greps the handler source for ``file.read()`` to catch silent
+reverts.

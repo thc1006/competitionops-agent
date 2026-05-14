@@ -230,6 +230,7 @@ async def extract_brief(
 # ----------------------------------------------------------------------
 
 _PDF_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB hard cap, prevents pdf bombs
+_PDF_UPLOAD_CHUNK_BYTES = 1 * 1024 * 1024  # 1 MiB read step
 _PDF_MAGIC_BYTES = b"%PDF-"
 
 
@@ -248,16 +249,32 @@ async def extract_brief_from_pdf(
     Validations:
     - size ≤ 10 MiB (413 Request Entity Too Large otherwise)
     - file content must start with ``%PDF-`` magic (422 otherwise)
+
+    Deep-review M5: the body is consumed in ``_PDF_UPLOAD_CHUNK_BYTES``
+    chunks and the 413 is raised the moment accumulated bytes overshoot
+    the cap. This keeps the largest in-process allocation bounded by
+    ``limit + chunk`` instead of growing to whatever the client decided
+    to send.
     """
-    contents = await file.read()
-    if len(contents) > _PDF_UPLOAD_MAX_BYTES:
-        raise HTTPException(
-            status_code=413,  # Content Too Large
-            detail=(
-                f"PDF size {len(contents)} bytes exceeds the "
-                f"{_PDF_UPLOAD_MAX_BYTES}-byte limit"
-            ),
-        )
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_PDF_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _PDF_UPLOAD_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,  # Content Too Large
+                detail=(
+                    f"PDF size exceeds the {_PDF_UPLOAD_MAX_BYTES}-byte "
+                    "limit (refused mid-stream after reading "
+                    f"{total} bytes)."
+                ),
+            )
+        chunks.append(chunk)
+    contents = b"".join(chunks)
+
     if not contents.startswith(_PDF_MAGIC_BYTES):
         raise HTTPException(
             status_code=422,  # Unprocessable Content
