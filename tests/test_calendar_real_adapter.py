@@ -304,6 +304,38 @@ async def test_real_create_checkpoint_series_partial_failure_preserves_created_i
 
 
 @pytest.mark.asyncio
+async def test_real_create_checkpoint_series_failure_on_first_event() -> None:
+    """Review follow-up — when the very first checkpoint fails, NO
+    stray events exist on Google's side. The dispatcher message must
+    reflect this (don't tell the operator to "delete stray events"
+    when there are none) AND the created-ids list in the error must
+    be empty, not "[]"-with-garbage.
+
+    Catches a class of regressions where the partial-failure branch
+    is taken unconditionally even when ``created`` is empty.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "internal"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleCalendarAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(
+            _make_series_action(offsets_days=[30, 14, 7]), dry_run=False
+        )
+
+    assert result.status == "failed"
+    # The message must NOT promise stray events when none exist.
+    msg = result.message or ""
+    assert "stray" not in msg.lower(), (
+        f"Message advises cleanup when zero events were created: {msg!r}"
+    )
+    # And the audit error must surface ZERO created IDs (not a comma
+    # mess or "[]"-with-garbage). Operator-readable.
+    err = result.error or ""
+    assert "created event ids: []" in err or "no events" in err.lower()
+
+
+@pytest.mark.asyncio
 async def test_real_create_checkpoint_series_respects_explicit_offsets() -> None:
     posts_seen: list[dict[str, Any]] = []
 

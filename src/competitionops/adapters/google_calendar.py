@@ -35,6 +35,16 @@ Out of scope:
 - Timezone normalisation — caller-supplied ISO strings must carry
   tzinfo. Naive datetimes are passed as-is; Calendar uses the
   calendar's primary timezone.
+- ISO 8601 well-formedness validation. ``_iso`` passes string input
+  through verbatim; a malformed string lands directly in the
+  Calendar API body and surfaces as 400 via ``safe_error_summary``.
+  Trust the planner to emit valid timestamps.
+- Past-dated checkpoint events. ``create_checkpoint_series`` emits
+  one event per offset relative to the deadline; if the deadline is
+  closer than the largest offset (e.g., deadline in 5 days with
+  default T-30d offset), the resulting event is in the past. Calendar
+  accepts past events; the planner should validate offset feasibility
+  upstream rather than expecting this layer to filter.
 - 429 backoff / retry.
 """
 
@@ -289,11 +299,24 @@ class GoogleCalendarAdapter:
                 created_events = result["events"]
                 # Partial-failure surface (issue-2 pattern) — surface
                 # ``failed`` but keep the created event IDs in the
-                # error message so the operator can clean up.
+                # error message so the operator can clean up. When the
+                # FIRST event fails, ``created_events`` is empty: the
+                # message must not promise stray events that don't
+                # exist (review follow-up #1).
                 if result.get("partial_failure"):
                     created_ids = ", ".join(
                         str(e.get("id", "")) for e in created_events
                     )
+                    if created_events:
+                        msg = (
+                            "Checkpoint series partially created — operator "
+                            "must delete the stray events or retry."
+                        )
+                    else:
+                        msg = (
+                            "Checkpoint series failed on first event — "
+                            "no cleanup needed; retry the action."
+                        )
                     return ExternalActionResult(
                         action_id=action.action_id,
                         target_system="google_calendar",
@@ -309,10 +332,7 @@ class GoogleCalendarAdapter:
                             f"{result['partial_failure']} | "
                             f"created event ids: [{created_ids}]"
                         ),
-                        message=(
-                            "Checkpoint series partially created — operator "
-                            "must delete the stray events or retry."
-                        ),
+                        message=msg,
                     )
                 external_id = (
                     f"series_{_hash(action.payload['competition_name'])}"
