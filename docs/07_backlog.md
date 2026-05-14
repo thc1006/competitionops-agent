@@ -174,6 +174,26 @@ and an end-to-end ``Send`` API parallel-writers proof (used to raise
 ``InvalidUpdateError`` before this PR; now both writers' records
 survive in the final state).
 
+**M4 (2026-05-14) closed** — Process-level singletons
+(``_plan_repo`` / ``_audit_log`` / ``_registry``) moved out of
+``competitionops.main`` (and the duplicate set in
+``competitionops_mcp.server``) into a new neutral
+``src/competitionops/runtime.py``. ``main`` / ``mcp_server`` /
+``workflows.nodes`` all import from there. The workflow no longer
+needs the local ``from competitionops import main as main_module``
+hack to dodge a circular dependency. A future worker process
+(Windmill executor / Celery / dedicated k8s Deployment) can run the
+LangGraph workflow without pulling in FastAPI by importing
+``competitionops.runtime`` directly. Test fixtures unchanged —
+``main._plan_repo is runtime._plan_repo`` (same function object), so
+existing ``main_module._plan_repo.cache_clear()`` calls still target
+the canonical lru_cache. 9 new tests in ``tests/test_runtime.py``:
+runtime module surface, env-driven plan_repo / audit_log switches,
+``main`` and ``mcp_server`` factories are runtime factories
+by-identity, structural guard that workflows/nodes contains no
+``from competitionops import main`` import, and an end-to-end check
+that ``audit_node`` runs without first instantiating the FastAPI app.
+
 ### P2-002 — Windmill workflow scripts
 
 Status: **Done (2026-05-14)** — Three Windmill rawscripts under
