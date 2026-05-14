@@ -321,6 +321,39 @@ def test_no_real_google_or_network_imports_in_adapter_modules() -> None:
         _check(module, allow_httpx=True)
 
 
+def test_real_mode_property_does_not_reference_api_base_attribute() -> None:
+    """Issue 1 — pin the dead-clause refactor structurally.
+
+    The behaviour-only tests (``test_real_mode_on_with_access_token_and_default_base``
+    in each adapter's test file) pass against BOTH the old AND new
+    implementations: `bool(token) and bool(default_prod_base)` evaluates
+    to True just as cleanly as `bool(token)` does. So if a future
+    maintainer "adds defence" by reinstating ``and bool(s.google_*_api_base)``,
+    no behaviour test catches it — the docstring-vs-code drift the
+    issue-1 refactor closed quietly reopens.
+
+    This AST check is the structural backstop: ``real_mode`` is
+    allowed to inspect ONLY ``google_oauth_access_token``. Any other
+    Settings attribute access inside the property fails the test.
+    """
+    import ast
+    for module, banned in (
+        (drive_mod, "google_drive_api_base"),
+        (docs_mod, "google_docs_api_base"),
+    ):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "real_mode":
+                attrs = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+                assert banned not in attrs, (
+                    f"{module.__name__}.real_mode references {banned!r} again — "
+                    "round-3 issue 1 closed this dead clause; do not re-add it. "
+                    "The URL validator already guarantees the base is non-empty "
+                    "at Settings construction, so AND-ing it into real_mode is "
+                    "dead code that misleads future readers."
+                )
+
+
 @pytest.mark.asyncio
 async def test_drive_adapter_blocks_unknown_action_type() -> None:
     adapter = GoogleDriveAdapter()

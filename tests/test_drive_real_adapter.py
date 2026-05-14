@@ -60,7 +60,9 @@ def test_real_mode_off_by_default() -> None:
 
 
 def test_real_mode_off_when_access_token_missing() -> None:
-    # base URL alone is not enough — we still need a bearer.
+    # Base URL alone is not enough — we still need a bearer. Honest gate
+    # (issue 1): real mode is bearer-only; base URL is configuration,
+    # not a gate. This test asserts the bearer-required half.
     settings = Settings(google_drive_api_base="https://drive-test.example.invalid")
     adapter = GoogleDriveAdapter(settings=settings)
     assert adapter.real_mode is False
@@ -68,6 +70,22 @@ def test_real_mode_off_when_access_token_missing() -> None:
 
 def test_real_mode_on_with_access_token_and_base() -> None:
     adapter = GoogleDriveAdapter(settings=_real_settings())
+    assert adapter.real_mode is True
+
+
+def test_real_mode_on_with_access_token_and_default_base() -> None:
+    """Issue 1 — the honest gate. ``google_drive_api_base`` has a prod-URL
+    default that is non-empty (the URL validator rejects ``""``), so a
+    bearer alone is enough to flip real mode on. Previously the
+    ``real_mode`` property AND-ed token with base URL, implying both
+    were required — but base was always truthy, so the second clause
+    was dead code. Pin the actual contract: bearer-only."""
+    settings = Settings(
+        google_oauth_access_token=SecretStr("ya29.token-without-base-override"),
+        # Note: NO google_drive_api_base override — relies on the
+        # ``https://www.googleapis.com`` default.
+    )
+    adapter = GoogleDriveAdapter(settings=settings)
     assert adapter.real_mode is True
 
 
