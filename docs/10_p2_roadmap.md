@@ -34,7 +34,7 @@
 | Tier 0 #2 | SecretStr for OAuth keys | 2 | 0.5 d | — | ✅ Done (2026-05-14, commit pending) |
 | Tier 0 #3 | Plane real adapter + external_id | 4 | 2 d | — | ✅ Done (2026-05-14, P1-004) |
 | Tier 0 #4 | Audit log 落地（File / sqlite） | 4 | 2 d | — | ✅ Done (2026-05-14, FileAuditLog) |
-| Tier 0 #5 | Real adapter query-then-create | 6 | 3 d | Tier 0 #2 | 待辦 |
+| Tier 0 #5 | Real adapter query-then-create | 6 | 3 d | Tier 0 #2 | ✅ Done (2026-05-14, Plane; pattern available for P1-001~003) |
 | **P2-004** | OpenTelemetry observability | 6 | 3–5 d | — | 待辦 |
 | **P2-001** | LangGraph workflow + interrupt | 6 | 5–7 d | P2-004（建議） | 待辦 |
 | **P2-005** | OCR / PDF ingestion | 5 (+1 GPU) | 5–7 d | Tier 0 #1（drive 路徑） | 待辦 |
@@ -445,3 +445,4 @@ bash scripts/verify.sh
 | 2026-05-14 | Tier 0 #1 SSRF allow-list；BriefExtractRequest 擴 url/drive；41 條新測試；P1-006 ready | Claude Code |
 | 2026-05-14 | P2-004 Sprint 6 OTLP exporter wiring；env opt-in；7 條測試 + 1 OTLP skip | Claude Code |
 | 2026-05-14 | P1-004 Plane real adapter；mock-first + httpx real mode；14 條測試 + Tier 0 #3 closed | Claude Code |
+| 2026-05-14 | Tier 0 #5 query-then-create idempotency；Plane real adapter GET-then-POST；5 條新測試；fall-through 容錯 | Claude Code |

@@ -163,10 +163,16 @@ def test_real_mode_requires_all_four_settings_fields() -> None:
 
 @pytest.mark.asyncio
 async def test_real_create_issue_posts_to_plane_workspace_endpoint() -> None:
+    """After the Tier 0 #5 idempotency upgrade the real adapter issues
+    a GET (search) before the POST (create). Verify both go to the
+    same workspace+project endpoint and that the POST carries the
+    expected payload."""
     captured_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json=[])  # search returns empty
         return httpx.Response(
             201,
             json={
@@ -183,14 +189,15 @@ async def test_real_create_issue_posts_to_plane_workspace_endpoint() -> None:
         issue = await adapter.create_issue(title="Pitch deck")
 
     assert issue["id"] == "real-issue-uuid-123"
-    assert len(captured_requests) == 1
-    request = captured_requests[0]
-    assert request.method == "POST"
+    assert len(captured_requests) == 2
+    methods = [req.method for req in captured_requests]
+    assert methods == ["GET", "POST"]
     expected_url_suffix = (
         f"/api/v1/workspaces/{_REAL_WORKSPACE}"
         f"/projects/{_REAL_PROJECT}/issues/"
     )
-    assert str(request.url).endswith(expected_url_suffix)
+    for req in captured_requests:
+        assert expected_url_suffix in str(req.url)
 
 
 @pytest.mark.asyncio
@@ -212,13 +219,17 @@ async def test_real_create_issue_sends_x_api_key_header() -> None:
 
 @pytest.mark.asyncio
 async def test_real_create_issue_body_contains_title_and_description() -> None:
-    captured_bodies: list[Any] = []
+    """The POST body (not the GET search params) carries the create payload."""
+    captured_post_bodies: list[Any] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        import json as _json
+        if request.method == "POST":
+            import json as _json
 
-        captured_bodies.append(_json.loads(request.content.decode()))
-        return httpx.Response(201, json={"id": "real-1", "name": "x"})
+            captured_post_bodies.append(_json.loads(request.content.decode()))
+            return httpx.Response(201, json={"id": "real-1", "name": "The Pitch"})
+        # GET search: nothing existing → fall through to POST
+        return httpx.Response(200, json=[])
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
@@ -227,7 +238,8 @@ async def test_real_create_issue_body_contains_title_and_description() -> None:
             title="The Pitch", description="10 pages", owner_role="business"
         )
 
-    body = captured_bodies[0]
+    assert len(captured_post_bodies) == 1
+    body = captured_post_bodies[0]
     assert body["name"] == "The Pitch"
     assert "10 pages" in body["description_html"]
     assert "business" in body["description_html"]  # owner_role merged in
@@ -301,3 +313,143 @@ async def test_adapter_source_does_not_reference_real_plane_hosts() -> None:
         assert needle not in source, (
             f"Plane adapter source must not hardcode {needle!r}; configure via Settings"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tier 0 #5 — query-then-create idempotency
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_create_issue_returns_existing_when_search_finds_match() -> None:
+    """If GET search returns an issue with name == title, the adapter must
+    surface that existing issue and never POST."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": "wrong-name-id", "name": "Other issue"},
+                    {"id": "existing-id-abc", "name": "Pitch deck"},
+                ],
+            )
+        # POST must never run for this case.
+        return httpx.Response(500, text="should not be called")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title="Pitch deck")
+
+    assert captured_methods == ["GET"]  # POST not called
+    assert issue["id"] == "existing-id-abc"
+    assert "url" in issue
+
+
+@pytest.mark.asyncio
+async def test_real_create_issue_handles_pagination_results_wrapper() -> None:
+    """Some Plane installations wrap the issue list under ``results``."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "count": 1,
+                    "results": [{"id": "wrapped-id", "name": "Wrapped task"}],
+                },
+            )
+        return httpx.Response(500, text="should not be called")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title="Wrapped task")
+
+    assert captured_methods == ["GET"]
+    assert issue["id"] == "wrapped-id"
+
+
+@pytest.mark.asyncio
+async def test_real_create_issue_is_idempotent_across_repeated_calls() -> None:
+    """Stateful handler: first call posts, second call's search finds the
+    just-posted issue and returns it without a second POST. Mirrors the
+    re-execute-with-allow_reexecute flow at the adapter layer."""
+    plane_db: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            # search ignores query and returns full plane_db; the
+            # adapter filters by exact name match itself.
+            return httpx.Response(200, json=list(plane_db))
+        # POST
+        import json as _json
+
+        body = _json.loads(request.content.decode())
+        new = {"id": f"real-id-{len(plane_db) + 1}", "name": body["name"]}
+        plane_db.append(new)
+        return httpx.Response(201, json=new)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        first = await adapter.create_issue(title="Same task")
+        second = await adapter.create_issue(title="Same task")
+
+    # Only one POST happened — plane_db has exactly one row.
+    assert len(plane_db) == 1
+    # Both calls return the same issue.
+    assert first["id"] == second["id"]
+    assert first["id"] == "real-id-1"
+
+
+@pytest.mark.asyncio
+async def test_real_create_issue_falls_through_when_search_returns_5xx() -> None:
+    """If Plane's search endpoint errors (e.g., disabled on a self-hosted
+    instance), the adapter must still create the issue rather than fail
+    hard. Idempotency is forfeit for that call but the workflow proceeds."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(500, text="search disabled")
+        return httpx.Response(
+            201, json={"id": "post-after-search-fail", "name": "x"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title="x")
+
+    assert captured_methods == ["GET", "POST"]
+    assert issue["id"] == "post-after-search-fail"
+
+
+@pytest.mark.asyncio
+async def test_real_create_issue_falls_through_when_search_raises_network() -> None:
+    """Network failures on the search step also degrade to plain POST,
+    matching the 5xx fall-through semantics."""
+    captured_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_methods.append(request.method)
+        if request.method == "GET":
+            raise httpx.ConnectError("synthetic search-step network failure")
+        return httpx.Response(
+            201, json={"id": "post-after-network-fail", "name": "x"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        issue = await adapter.create_issue(title="x")
+
+    assert captured_methods == ["GET", "POST"]
+    assert issue["id"] == "post-after-network-fail"

@@ -91,8 +91,10 @@ all four Settings fields are present (``plane_base_url``,
 ``plane_project_id``); otherwise falls back to deterministic mock. Tests
 use ``httpx.MockTransport`` so the suite stays offline. Tier 0 #3
 closed — every executed audit record now surfaces ``target_external_id``
-including Plane. Tier 0 #5 query-then-create idempotency is the next
-follow-up.
+including Plane. Tier 0 #5 closed — real mode does GET-by-search before
+POST, returning the existing issue on match (idempotent across repeated
+approvals). Search-step failures degrade to plain POST so self-hosted
+instances with search disabled still work.
 
 ### P1-005 — Drive folder creation / move files
 

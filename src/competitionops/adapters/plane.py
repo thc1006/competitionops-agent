@@ -20,11 +20,18 @@ Real mode:
 - Response ``id`` becomes ``target_external_id`` in the audit log,
   closing Tier 0 #3.
 
-Out of scope for this commit (follow-up Tier 0 #5):
-- Query-then-create idempotency: real adapter currently posts on each
-  approved action. A repeat approval (with ``allow_reexecute=true``)
-  would create a second Plane issue.
-- 429 / 5xx retry + exponential backoff.
+Idempotency (Tier 0 #5):
+- Before each create, the real adapter issues
+  ``GET .../issues/?search={title}`` and returns the existing issue if
+  its ``name`` matches exactly. Only the no-match case falls through to
+  POST. So a repeat approval with ``allow_reexecute=true`` no longer
+  duplicates the Plane issue — it surfaces the original id.
+- The search step degrades gracefully: if Plane responds 4xx/5xx on the
+  GET (e.g. search disabled on some self-hosted instances) we fall
+  through to POST rather than blocking the entire flow.
+
+Out of scope for this commit:
+- 429 / 5xx retry + exponential backoff on the POST itself.
 
 The httpx client is injectable through ``__init__(client=...)`` so tests
 use ``httpx.MockTransport`` and never touch the network.
@@ -124,7 +131,7 @@ class PlaneAdapter:
         assert s.plane_project_id is not None
 
         api_key = s.plane_api_key.get_secret_value()
-        url = (
+        list_url = (
             s.plane_base_url.rstrip("/")
             + _PLANE_API_PATH.format(
                 slug=s.plane_workspace_slug, project_id=s.plane_project_id
@@ -135,25 +142,81 @@ class PlaneAdapter:
             description_html = (
                 f"{description_html}\n\nOwner role: {owner_role}".strip()
             )
+        headers = {
+            "X-API-Key": api_key,
+            "Accept": "application/json",
+        }
 
         async with self._client_session() as client:
+            # Tier 0 #5 — query-then-create idempotency.
+            existing = await self._search_existing_issue(
+                client, list_url, title, headers
+            )
+            if existing is not None:
+                return self._with_url(existing)
+
             response = await client.post(
-                url,
+                list_url,
                 json={"name": title, "description_html": description_html},
-                headers={
-                    "X-API-Key": api_key,
-                    "Accept": "application/json",
-                },
+                headers=headers,
                 timeout=_HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data: dict[str, Any] = response.json()
-            data.setdefault(
-                "url",
-                f"{s.plane_base_url.rstrip('/')}/{s.plane_workspace_slug}"
-                f"/projects/{s.plane_project_id}/issues/{data.get('id', '')}",
+            return self._with_url(data)
+
+    async def _search_existing_issue(
+        self,
+        client: httpx.AsyncClient,
+        list_url: str,
+        title: str,
+        headers: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Return the existing Plane issue with ``name == title`` or None.
+
+        Search-step failures (4xx/5xx, malformed JSON, network) fall through
+        to POST rather than blocking the entire create. Self-hosted Plane
+        instances with search disabled therefore still work — they just lose
+        the idempotency guarantee for that one call.
+        """
+        try:
+            response = await client.get(
+                list_url,
+                params={"search": title},
+                headers=headers,
+                timeout=_HTTP_TIMEOUT_SECONDS,
             )
-            return data
+        except httpx.HTTPError:
+            return None
+        if response.status_code >= 400:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        # Plane variants: bare ``[...]`` or ``{"results": [...], ...}``.
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            raw_items = payload.get("results", [])
+            items = raw_items if isinstance(raw_items, list) else []
+        else:
+            return None
+        for item in items:
+            if isinstance(item, dict) and item.get("name") == title:
+                return item
+        return None
+
+    def _with_url(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Ensure the issue dict has a ``url`` for audit-link rendering."""
+        s = self.settings
+        assert s.plane_base_url is not None
+        data.setdefault(
+            "url",
+            f"{s.plane_base_url.rstrip('/')}/{s.plane_workspace_slug}"
+            f"/projects/{s.plane_project_id}/issues/{data.get('id', '')}",
+        )
+        return data
 
     @asynccontextmanager
     async def _client_session(self) -> AsyncIterator[httpx.AsyncClient]:
