@@ -56,8 +56,14 @@ def test_openapi_has_required_component_schemas() -> None:
 
 
 def test_openapi_no_request_body_uses_additional_properties_only() -> None:
-    """Defensive: no POST endpoint should fall back to a bare ``additionalProperties``
-    request body. Such a body means an untyped dict slipped through.
+    """Defensive: no POST endpoint with a JSON body should fall back to a
+    bare ``additionalProperties`` request body. Such a body means an
+    untyped dict slipped through.
+
+    ``multipart/form-data`` request bodies (P2-005 PDF upload) are
+    exempt — they use FastAPI's ``File()`` / ``UploadFile`` mechanism,
+    not a Pydantic body model. The CLAUDE rule 8 source-of-truth check
+    only applies to JSON payloads.
     """
     spec = _spec()
     for path, path_item in spec["paths"].items():
@@ -67,12 +73,20 @@ def test_openapi_no_request_body_uses_additional_properties_only() -> None:
             request_body = op.get("requestBody")
             if not request_body:
                 continue
-            schema = request_body["content"]["application/json"]["schema"]
+            content = request_body.get("content", {})
+            json_schema = content.get("application/json", {}).get("schema")
+            if json_schema is None:
+                # Multipart-only endpoint (e.g., file upload) — no JSON
+                # body to validate. The endpoint's typed parameters
+                # (UploadFile / File) keep their own contract via
+                # FastAPI dependencies.
+                continue
+            schema = json_schema
             # Acceptable: $ref to a component
             if "$ref" in schema:
                 continue
             # Inline schemas must at least name "properties" — additionalProperties-only
             # bodies are how raw `dict[str, X]` parameters render and that's what we ban.
             assert "properties" in schema or "allOf" in schema or "oneOf" in schema, (
-                f"{method.upper()} {path} uses an untyped request body schema: {schema}"
+                f"{method.upper()} {path} uses an untyped JSON request body schema: {schema}"
             )

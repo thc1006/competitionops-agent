@@ -2,12 +2,13 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from competitionops.adapters.file_audit import FileAuditLog
 from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
+from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import Settings, get_settings
 from competitionops.ports import AuditLogPort
@@ -215,6 +216,53 @@ async def extract_brief(
     return extractor.extract_from_text(
         content=payload.content, source_uri=payload.source_uri
     )
+
+
+# ----------------------------------------------------------------------
+# P2-005 — PDF upload extraction
+# ----------------------------------------------------------------------
+
+_PDF_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB hard cap, prevents pdf bombs
+_PDF_MAGIC_BYTES = b"%PDF-"
+
+
+@app.post("/briefs/extract/pdf", response_model=CompetitionBrief)
+async def extract_brief_from_pdf(
+    file: UploadFile = File(...),
+    settings: Settings = Depends(get_settings),
+) -> CompetitionBrief:
+    """Upload a PDF, extract a structured ``CompetitionBrief``.
+
+    P2-005 Sprint 0-2 ships the mock PDF adapter — it treats the bytes
+    after the ``%PDF-`` header as plain UTF-8 text. The Docling-backed
+    real adapter lands in Sprint 3 under ``--extra ocr`` and will be
+    selected here via a future ``Settings.pdf_adapter`` switch.
+
+    Validations:
+    - size ≤ 10 MiB (413 Request Entity Too Large otherwise)
+    - file content must start with ``%PDF-`` magic (422 otherwise)
+    """
+    contents = await file.read()
+    if len(contents) > _PDF_UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,  # Content Too Large
+            detail=(
+                f"PDF size {len(contents)} bytes exceeds the "
+                f"{_PDF_UPLOAD_MAX_BYTES}-byte limit"
+            ),
+        )
+    if not contents.startswith(_PDF_MAGIC_BYTES):
+        raise HTTPException(
+            status_code=422,  # Unprocessable Content
+            detail=(
+                "uploaded file does not start with the PDF magic bytes "
+                f"({_PDF_MAGIC_BYTES.decode('ascii')!r})"
+            ),
+        )
+
+    pdf_port = MockPdfAdapter()
+    extractor = BriefExtractor(settings=settings, pdf_port=pdf_port)
+    return extractor.extract_from_pdf(contents)
 
 
 # ----------------------------------------------------------------------

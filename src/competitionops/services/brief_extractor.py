@@ -1,8 +1,10 @@
+import hashlib
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from competitionops.config import Settings
+from competitionops.ports import PdfIngestionPort
 from competitionops.schemas import CompetitionBrief, Deliverable, ScoringRubricItem
 
 _TZ = ZoneInfo("Asia/Taipei")
@@ -49,8 +51,36 @@ class BriefExtractor:
     ingestion behind the same interface.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        pdf_port: PdfIngestionPort | None = None,
+    ) -> None:
         self.settings = settings
+        self.pdf_port = pdf_port
+
+    def extract_from_pdf(
+        self,
+        pdf_bytes: bytes,
+        source_uri: str | None = None,
+    ) -> CompetitionBrief:
+        """Render a PDF to text via ``pdf_port`` and reuse ``extract_from_text``.
+
+        ``source_uri`` defaults to ``pdf://<sha1-of-bytes>[:16]`` so the
+        audit trail can link back to the exact byte payload without
+        ever recording the bytes themselves.
+        """
+        if self.pdf_port is None:
+            raise RuntimeError(
+                "BriefExtractor.pdf_port is not configured; pass a "
+                "PdfIngestionPort to the constructor to enable PDF "
+                "ingestion (P2-005)."
+            )
+        text = self.pdf_port.extract(pdf_bytes)
+        if source_uri is None:
+            digest = hashlib.sha1(pdf_bytes).hexdigest()[:16]
+            source_uri = f"pdf://{digest}"
+        return self.extract_from_text(content=text, source_uri=source_uri)
 
     def extract_from_text(
         self, content: str, source_uri: str | None = None

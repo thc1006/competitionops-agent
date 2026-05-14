@@ -174,3 +174,17 @@ P2-004 main track complete. Remaining: optional polish (Sprint 6+
 metric attribute review, custom resource attributes for service.name).
 
 ### P2-005 — Local OCR / layout parsing with GPU
+
+Status: **Sprint 0-2 Done (2026-05-14)** — ``PdfIngestionPort``
+Protocol (``extract(pdf_bytes) -> str``) + ``MockPdfAdapter`` (strips
+``%PDF-`` header, decodes the rest as UTF-8 — Sprint 0).
+``BriefExtractor.extract_from_pdf(pdf_bytes)`` glues the port to the
+existing text extractor and computes
+``source_uri = "pdf://" + sha1(bytes)[:16]`` for audit-linkable
+provenance (Sprint 1). ``POST /briefs/extract/pdf`` multipart endpoint
+accepts ``UploadFile`` with a 10 MiB hard cap (413) + ``%PDF-`` magic
+check (422); the Stage 5 OpenAPI guard now skips multipart bodies
+since they don't carry a JSON schema (Sprint 2). 13 tests cover all
+three sprints. Sprints 3 (Docling real engine), 4 (GPU), and 5
+(Drive path) deferred — they need either ``--extra ocr`` or the
+not-yet-shipped P1-005 real Drive adapter.
