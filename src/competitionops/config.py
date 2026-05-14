@@ -110,6 +110,12 @@ class Settings(BaseSettings):
     # Override the Drive API base URL for staging/self-hosted Drive shims.
     # Production uses the default ``https://www.googleapis.com``.
     google_drive_api_base: str = "https://www.googleapis.com"
+    # P1-001 — Google Docs API base. Default is the prod Docs URL so an
+    # operator providing only a bearer flips Docs into real mode.
+    # Staging against a Docs-emulator overrides this. Validated like
+    # the Drive base so an invalid value crashes at Settings
+    # construction, not at the first ``documents.create``.
+    google_docs_api_base: str = "https://docs.googleapis.com"
 
     plane_base_url: str | None = None
     plane_api_key: SecretStr | None = None
@@ -138,6 +144,13 @@ class Settings(BaseSettings):
         # The default is non-None so the cast is safe; the helper
         # still handles ``None`` for symmetry with optional fields.
         result = _validate_http_url(v, field_name="google_drive_api_base")
+        assert result is not None  # for mypy — required field, never None
+        return result
+
+    @field_validator("google_docs_api_base")
+    @classmethod
+    def _validate_docs_api_base(cls, v: str) -> str:
+        result = _validate_http_url(v, field_name="google_docs_api_base")
         assert result is not None  # for mypy — required field, never None
         return result
 

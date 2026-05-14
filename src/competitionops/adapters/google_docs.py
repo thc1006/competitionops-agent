@@ -1,30 +1,126 @@
-"""Mock-first Google Docs adapter — no network, no credentials."""
+"""Google Docs adapter — mock-first with real-mode switch (P1-001).
+
+The Sprint 0 stateful mock survives unchanged for unit tests and
+dry-run previews. P1-001 layers a real httpx-backed implementation
+behind the exact same ``GoogleDocsAdapter`` interface so domain
+code does not notice the switch. Activation is binary: real mode
+flips on only when both ``Settings.google_oauth_access_token`` AND
+``Settings.google_docs_api_base`` are present (the latter has a
+prod-URL default, so a bearer alone is enough). Partial config
+keeps the mock — same defensive contract as Plane / Drive.
+
+Real-mode contract:
+
+- ``POST {base}/v1/documents`` (Docs ``documents.create``) with
+  ``Authorization: Bearer <token>`` and JSON body ``{"title": ...}``.
+- If the create action carries ``sections``, the adapter follows
+  with ``POST {base}/v1/documents/{documentId}:batchUpdate`` to
+  insert each section heading at the end of the body.
+- ``append_section`` maps to the same ``batchUpdate`` endpoint with
+  an ``insertText`` at ``endOfSegmentLocation`` — heading then body.
+- Deep-review C1 — ``dry_run=True`` short-circuits BEFORE any HTTP
+  call and returns a synthetic ``dry_run_<sha1(title)[:8]>`` preview.
+  ``Settings.dry_run_default=True`` is the hot path; silent writes
+  here would violate CLAUDE.md rule #3.
+- Error redaction: HTTPStatusError goes through ``safe_error_summary``
+  (M8), all other ``httpx.HTTPError`` and ``httpx.InvalidURL``
+  (round-3 M4) go through ``safe_network_summary``. Document titles
+  / section bodies can carry user content, so leaking ``str(exc)``
+  back to the audit log would re-introduce the M8 / M4 leaks.
+
+Out of scope:
+
+- Cross-API idempotency via Drive ``files.list``. The Docs REST API
+  has no native name lookup, and doing the search through Drive
+  would couple this adapter to Drive auth scope + a parent_id the
+  current ``ExternalAction`` payload doesn't carry. Re-creating a
+  doc with the same title produces a new ``documentId`` — operators
+  who care must wire Drive search at the orchestrator level (a
+  follow-up sprint).
+- OAuth refresh — operators wire a short-lived bearer via
+  ``Settings.google_oauth_access_token``.
+- 429 backoff / retry — relies on caller-side retry today.
+"""
 
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
+import httpx
+
+from competitionops.adapters._http_errors import (
+    safe_error_summary,
+    safe_network_summary,
+)
+from competitionops.config import Settings, get_settings
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
 _CREATE_TYPES = frozenset(
     {"google.docs.create_proposal_outline", "google.docs.create_doc"}
 )
+_APPEND_TYPE = "google.docs.append_section"
+_DOCS_CREATE_PATH = "/v1/documents"
+_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _hash(text: str, length: int = 8) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:length]
 
 
+def _docs_ui_url(document_id: str) -> str:
+    """User-facing Google Docs URL for audit-link rendering."""
+    return f"https://docs.google.com/document/d/{document_id}/edit"
+
+
 class GoogleDocsAdapter:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.settings = settings if settings is not None else get_settings()
+        self._injected_client = client
+        # Mock-mode state — used in tests, dry-run previews, and audit trail.
         self.docs: dict[str, dict[str, Any]] = {}
         self.calls: list[dict[str, Any]] = []
+
+    @property
+    def real_mode(self) -> bool:
+        """Real REST mode is enabled only when token AND base URL are set.
+
+        ``google_docs_api_base`` defaults to the prod URL so a bearer
+        alone flips this on. Operators staging against an emulator
+        override the base; without a bearer we stay on the mock.
+        """
+        s = self.settings
+        return bool(s.google_oauth_access_token) and bool(s.google_docs_api_base)
 
     # ---- high-level operations --------------------------------------
 
     async def create_doc(
         self, *, title: str, sections: list[str] | None = None
+    ) -> dict[str, Any]:
+        if self.real_mode:
+            return await self._real_create_doc(title=title, sections=sections)
+        return await self._mock_create_doc(title=title, sections=sections)
+
+    async def append_section(
+        self, *, doc_id: str, heading: str, body: str = ""
+    ) -> dict[str, Any]:
+        if self.real_mode:
+            return await self._real_append_section(
+                doc_id=doc_id, heading=heading, body=body
+            )
+        return await self._mock_append_section(
+            doc_id=doc_id, heading=heading, body=body
+        )
+
+    # ---- mock path ---------------------------------------------------
+
+    async def _mock_create_doc(
+        self, *, title: str, sections: list[str] | None
     ) -> dict[str, Any]:
         doc_id = f"mock_doc_{_hash(title)}"
         if doc_id not in self.docs:
@@ -37,8 +133,8 @@ class GoogleDocsAdapter:
             }
         return self.docs[doc_id]
 
-    async def append_section(
-        self, *, doc_id: str, heading: str, body: str = ""
+    async def _mock_append_section(
+        self, *, doc_id: str, heading: str, body: str
     ) -> dict[str, Any]:
         doc = self.docs.get(doc_id)
         if doc is None:
@@ -48,7 +144,95 @@ class GoogleDocsAdapter:
         doc["body"][heading] = body
         return doc
 
-    # ---- dispatch ----------------------------------------------------
+    # ---- real path ---------------------------------------------------
+
+    async def _real_create_doc(
+        self, *, title: str, sections: list[str] | None
+    ) -> dict[str, Any]:
+        s = self.settings
+        assert s.google_oauth_access_token is not None  # for mypy
+        token = s.google_oauth_access_token.get_secret_value()
+        create_url = s.google_docs_api_base.rstrip("/") + _DOCS_CREATE_PATH
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        }
+
+        async with self._client_session() as client:
+            response = await client.post(
+                create_url,
+                json={"title": title},
+                headers=headers,
+                timeout=_HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+            document_id = data.get("documentId", "")
+
+            if sections:
+                # Two-step contract: create returns an empty doc body,
+                # batchUpdate inserts the section headings at the end.
+                batchupdate_url = (
+                    s.google_docs_api_base.rstrip("/")
+                    + f"/v1/documents/{document_id}:batchUpdate"
+                )
+                batch_response = await client.post(
+                    batchupdate_url,
+                    json={"requests": _build_section_insert_requests(sections)},
+                    headers=headers,
+                    timeout=_HTTP_TIMEOUT_SECONDS,
+                )
+                batch_response.raise_for_status()
+
+        return {
+            "id": document_id,
+            "title": data.get("title", title),
+            "sections": list(sections or []),
+            "url": _docs_ui_url(document_id),
+        }
+
+    async def _real_append_section(
+        self, *, doc_id: str, heading: str, body: str
+    ) -> dict[str, Any]:
+        s = self.settings
+        assert s.google_oauth_access_token is not None  # for mypy
+        token = s.google_oauth_access_token.get_secret_value()
+        batchupdate_url = (
+            s.google_docs_api_base.rstrip("/")
+            + f"/v1/documents/{doc_id}:batchUpdate"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        }
+        # Single insertText at endOfSegmentLocation containing
+        # heading + body. v1 keeps the API surface minimal; a follow-up
+        # can split heading and body into separate requests + add
+        # updateParagraphStyle(HEADING_2) so the heading renders bold.
+        combined_text = f"{heading}\n{body}\n" if body else f"{heading}\n"
+        requests_payload = [
+            {
+                "insertText": {
+                    "endOfSegmentLocation": {},
+                    "text": combined_text,
+                }
+            }
+        ]
+        async with self._client_session() as client:
+            response = await client.post(
+                batchupdate_url,
+                json={"requests": requests_payload},
+                headers=headers,
+                timeout=_HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+
+        return {
+            "id": doc_id,
+            "url": _docs_ui_url(doc_id),
+        }
+
+    # ---- ExternalActionExecutor dispatch ----------------------------
 
     async def execute(
         self, action: ExternalAction, dry_run: bool = True
@@ -56,6 +240,16 @@ class GoogleDocsAdapter:
         self.calls.append(
             {"action_id": action.action_id, "type": action.type, "dry_run": dry_run}
         )
+        # Deep-review C1 — real-mode must honor dry_run before touching
+        # the network. The mock has no side effects so it's fine to keep
+        # running through it during dry_run; only real mode needs the
+        # short-circuit.
+        if (
+            dry_run
+            and self.real_mode
+            and (action.type in _CREATE_TYPES or action.type == _APPEND_TYPE)
+        ):
+            return self._dry_run_preview(action)
         try:
             if action.type in _CREATE_TYPES:
                 doc = await self.create_doc(
@@ -66,10 +260,10 @@ class GoogleDocsAdapter:
                     action,
                     dry_run=dry_run,
                     external_id=doc["id"],
-                    external_url=doc["url"],
-                    message="Created Doc (mock).",
+                    external_url=doc.get("url"),
+                    message=f"Created Doc ({self._mode_label()}).",
                 )
-            if action.type == "google.docs.append_section":
+            if action.type == _APPEND_TYPE:
                 doc = await self.append_section(
                     doc_id=action.payload["doc_id"],
                     heading=action.payload["heading"],
@@ -79,8 +273,8 @@ class GoogleDocsAdapter:
                     action,
                     dry_run=dry_run,
                     external_id=doc["id"],
-                    external_url=doc["url"],
-                    message="Appended Doc section (mock).",
+                    external_url=doc.get("url"),
+                    message=f"Appended Doc section ({self._mode_label()}).",
                 )
         except KeyError as exc:
             return ExternalActionResult(
@@ -90,6 +284,32 @@ class GoogleDocsAdapter:
                 error=f"missing payload field: {exc}",
                 message="Docs adapter rejected payload.",
             )
+        except httpx.HTTPStatusError as exc:
+            # M8 — never echo the raw response body. Captive portals
+            # and corporate proxies often interpose HTML 4xx / 5xx pages
+            # on Google endpoints; safe_error_summary structures the
+            # output and caps it at 200 chars.
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_docs",
+                status="failed",
+                error=safe_error_summary(exc.response, target="docs"),
+                message="Docs REST returned an error status.",
+            )
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # Round-2 M8 + round-3 M4 — drop ``str(exc)`` body; the
+            # exception message embeds the request URL which carries
+            # user content (doc title, batchUpdate body). InvalidURL is
+            # its own exception class outside HTTPError, so the
+            # tuple-catch is necessary to keep the same leak surface
+            # closed across both classes.
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_docs",
+                status="failed",
+                error=safe_network_summary(exc, target="docs"),
+                message="Docs network error.",
+            )
 
         return ExternalActionResult(
             action_id=action.action_id,
@@ -97,6 +317,28 @@ class GoogleDocsAdapter:
             status="failed",
             error=f"unknown action type {action.type!r}",
             message="Docs adapter has no handler for this action type.",
+        )
+
+    def _dry_run_preview(self, action: ExternalAction) -> ExternalActionResult:
+        """Synthetic preview for dry-run real-mode. Mirrors Plane / Drive.
+
+        external_id is deterministic over the action payload so a PM
+        previewing twice sees the same synthetic id. external_url is
+        None — no real doc has been created. Audit consumers render
+        "preview only" UI off the dry_run status.
+        """
+        if action.type in _CREATE_TYPES:
+            key = action.payload.get("title", "")
+        else:
+            key = action.payload.get("doc_id", "")
+        synthetic_id = f"dry_run_{_hash(str(key))}"
+        return ExternalActionResult(
+            action_id=action.action_id,
+            target_system="google_docs",
+            status="dry_run",
+            external_id=synthetic_id,
+            external_url=None,
+            message=f"Dry-run Docs preview ({self._mode_label()}).",
         )
 
     @staticmethod
@@ -116,3 +358,35 @@ class GoogleDocsAdapter:
             external_url=external_url,
             message=message,
         )
+
+    def _mode_label(self) -> str:
+        return "real" if self.real_mode else "mock"
+
+    @asynccontextmanager
+    async def _client_session(self) -> AsyncIterator[httpx.AsyncClient]:
+        """Yield the injected client (test) or a freshly-managed one (prod)."""
+        if self._injected_client is not None:
+            yield self._injected_client
+            return
+        async with httpx.AsyncClient() as client:
+            yield client
+
+
+def _build_section_insert_requests(sections: list[str]) -> list[dict[str, Any]]:
+    """Build a list of Docs ``insertText`` requests, one per section heading.
+
+    Each heading is inserted at the document's ``endOfSegmentLocation``
+    with a trailing newline so subsequent headings start on a fresh
+    paragraph. A follow-up can attach ``updateParagraphStyle(HEADING_2)``
+    so the headings render bold; v1 keeps the request shape minimal to
+    reduce failure modes.
+    """
+    return [
+        {
+            "insertText": {
+                "endOfSegmentLocation": {},
+                "text": f"{section}\n",
+            }
+        }
+        for section in sections
+    ]

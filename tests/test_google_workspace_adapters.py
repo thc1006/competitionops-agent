@@ -1,5 +1,6 @@
 import inspect
 from datetime import datetime
+from types import ModuleType
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -225,44 +226,99 @@ async def test_audit_event_generated_for_every_executed_adapter_call() -> None:
 
 
 def test_no_real_google_or_network_imports_in_adapter_modules() -> None:
-    """Stage 4 + P1-005 guard.
+    """Stage 4 + P1-005 + P1-001 guard.
 
     All four Google adapters must avoid the real Google SDK (we keep our
     own httpx-based adapters so domain code never imports googleapiclient).
-    Generic network libraries are tolerated **only** for ``drive_mod``,
-    which has graduated to a mock-first + real-mode adapter (P1-005).
-    Docs / Sheets / Calendar remain pure mocks; they still ban httpx /
-    requests / urllib until P1-001~003 lift them too.
+    Generic ``httpx`` is tolerated **only** for adapters that have
+    graduated to a mock-first + real-mode design:
+
+    - ``drive_mod`` — P1-005 (real folder creation)
+    - ``docs_mod``  — P1-001 (real documents.create + batchUpdate)
+
+    Sheets / Calendar remain pure mocks; they still ban httpx /
+    ``requests`` (PyPI) / ``urllib`` until P1-002 and P1-003 lift them too.
+
+    Lib bans use AST import inspection rather than a substring grep —
+    P1-001 added Docs's ``batchUpdate`` body which carries an upstream
+    JSON key literally named ``"requests"``, and substring matching
+    against the source would false-positive on that. Credentials / .env
+    paths are still substring-matched because no module would
+    legitimately mention ``credentials.json`` in any other context.
     """
-    sdk_forbidden = [
+    import ast
+
+    # Top-level module names (root segment) that are forbidden as imports
+    # in mock-only adapters. ``urllib`` covers ``urllib.request``;
+    # ``http`` covers ``http.client``.
+    sdk_forbidden_imports = {
         "googleapiclient",
+        "google_auth_oauthlib",
+    }
+    sdk_forbidden_from = {
+        # ``from google.oauth2 import ...`` / ``from google.auth import ...``
         "google.oauth2",
         "google.auth",
-        "google_auth_oauthlib",
+    }
+    network_forbidden_imports = {
+        "requests",
+        "http",  # banishes http.client
+        "socket",  # banishes raw socket.socket
+    }
+    network_forbidden_from = {
+        "urllib.request",
+    }
+    file_substr_forbidden = [
         "open('.env",
         'open(".env',
         "credentials.json",
         "client_secret.json",
     ]
-    network_forbidden = [
-        "requests",
-        "urllib.request",
-        "http.client",
-        "socket.socket",
-    ]
-    # drive_mod is exempt from the network ban (real mode); the rest aren't.
-    for module in (docs_mod, sheets_mod, calendar_mod):
-        source = inspect.getsource(module)
-        for needle in sdk_forbidden + network_forbidden + ["httpx"]:
-            assert needle not in source, (
-                f"{module.__name__} must not reference {needle!r} (mock-first)"
-            )
-    drive_source = inspect.getsource(drive_mod)
-    for needle in sdk_forbidden + network_forbidden:
-        assert needle not in drive_source, (
-            f"{drive_mod.__name__} must not reference {needle!r} "
-            "(real mode is httpx-only, no Google SDK or low-level sockets)"
+
+    def _imported_names(module: ModuleType) -> tuple[set[str], set[str]]:
+        """Return (top-level import names, ``from X import …`` X names)."""
+        tree = ast.parse(inspect.getsource(module))
+        plain: set[str] = set()
+        froms: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    plain.add(alias.name.split(".")[0])
+                    plain.add(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    froms.add(node.module)
+        return plain, froms
+
+    def _check(module: ModuleType, *, allow_httpx: bool) -> None:
+        plain, froms = _imported_names(module)
+        plain_banned = sdk_forbidden_imports | network_forbidden_imports
+        from_banned = sdk_forbidden_from | network_forbidden_from
+        if not allow_httpx:
+            plain_banned = plain_banned | {"httpx"}
+        offending_plain = plain & plain_banned
+        offending_from = froms & from_banned
+        assert not offending_plain, (
+            f"{module.__name__} imports forbidden module(s) "
+            f"{sorted(offending_plain)} — mock-first / real-mode rules "
+            "(P1-005 / P1-001) ban real Google SDKs and non-httpx network libs."
         )
+        assert not offending_from, (
+            f"{module.__name__} has forbidden ``from {sorted(offending_from)[0]}`` import — "
+            "real Google SDK or non-httpx network lib."
+        )
+        # File-path substrings still use the substring check — no
+        # legitimate code path would mention ``credentials.json``.
+        source = inspect.getsource(module)
+        for needle in file_substr_forbidden:
+            assert needle not in source, (
+                f"{module.__name__} must not reference {needle!r}"
+            )
+
+    for module in (sheets_mod, calendar_mod):
+        _check(module, allow_httpx=False)
+    for module in (drive_mod, docs_mod):
+        _check(module, allow_httpx=True)
 
 
 @pytest.mark.asyncio
