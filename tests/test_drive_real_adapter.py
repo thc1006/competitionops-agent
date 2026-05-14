@@ -273,10 +273,19 @@ async def test_real_create_folder_surfaces_401_as_failed_action() -> None:
 
 @pytest.mark.asyncio
 async def test_real_create_folder_surfaces_network_error_as_failed_action() -> None:
+    """Round-2 M8: like Plane, Drive's audit ``error`` must surface the
+    httpx exception class (so operators can grep their logs by error
+    type) but NOT the exception body — httpx's ``str(exc)`` typically
+    includes the request URL, and Drive's search URL embeds
+    ``q=name='<folder_name>'`` where the folder name is user content.
+    A token-like substring in a folder name would leak via that
+    branch."""
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
             return httpx.Response(200, json={"files": []})
-        raise httpx.ConnectTimeout("upstream timed out")
+        raise httpx.ConnectTimeout(
+            "upstream timed out", request=request
+        )
 
     client = _mock_transport(handler)
     adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
@@ -285,16 +294,19 @@ async def test_real_create_folder_surfaces_network_error_as_failed_action() -> N
         action_id="act_drive_timeout",
         type="google.drive.create_competition_folder",
         target_system="google_drive",
-        payload={"folder_name": "Timeout Folder"},
+        payload={"folder_name": "SECRET-TOKEN-AS-FOLDER-NAME"},
         requires_approval=True,
         risk_level=RiskLevel.medium,
     )
     result = await adapter.execute(action, dry_run=False)
 
     assert result.status == "failed"
-    assert "network" in (result.error or "").lower() or "timeout" in (
-        result.error or ""
-    ).lower()
+    # Class name is the operator's diagnostic signal.
+    assert "ConnectTimeout" in (result.error or "")
+    # Body / URL is the leak surface — must NOT appear.
+    err = result.error or ""
+    assert "upstream timed out" not in err
+    assert "SECRET-TOKEN" not in err
 
 
 # ---------------------------------------------------------------------------

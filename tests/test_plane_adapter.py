@@ -287,17 +287,31 @@ async def test_real_execute_maps_http_status_error_to_failed_result() -> None:
 
 @pytest.mark.asyncio
 async def test_real_execute_maps_network_error_to_failed_result() -> None:
+    """Round-2 M8: the audit ``error`` field must contain the exception
+    class name (operator diagnostic signal) but NOT the exception body
+    — httpx puts the request URL there, and Plane's URL embeds
+    ``search=<title>`` where the title is user content. A copy-pasted
+    secret in a title would leak via that branch otherwise."""
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("synthetic network failure")
+        raise httpx.ConnectError(
+            "synthetic network failure", request=request
+        )
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         adapter = PlaneAdapter(settings=_settings_real(), client=client)
-        result = await adapter.execute(_make_action(), dry_run=False)
+        result = await adapter.execute(
+            _make_action(title="SECRET-TOKEN-AS-ISSUE-TITLE"), dry_run=False
+        )
 
     assert result.status == "failed"
     assert "network" in (result.message or "").lower()
-    assert "synthetic" in (result.error or "")
+    # Class name is the operator's signal.
+    assert "ConnectError" in (result.error or "")
+    # Body / URL is the leak surface — must NOT appear.
+    err = result.error or ""
+    assert "synthetic network failure" not in err
+    assert "SECRET-TOKEN" not in err
 
 
 # ---------------------------------------------------------------------------

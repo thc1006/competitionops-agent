@@ -27,7 +27,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from competitionops.adapters._http_errors import safe_error_summary
+from competitionops.adapters._http_errors import (
+    safe_error_summary,
+    safe_network_summary,
+)
 
 
 def _response(
@@ -229,3 +232,84 @@ def test_status_code_always_appears_in_summary(status: int) -> None:
     resp = _response(status, json_body={"error": "x"})
     summary = safe_error_summary(resp)
     assert str(status) in summary
+
+
+# ---------------------------------------------------------------------------
+# Round-2 M8 — ``safe_network_summary`` for ``httpx.HTTPError`` failures
+# that are NOT status errors (ConnectError / ReadTimeout / WriteError /
+# etc.). The round-1 ``safe_error_summary`` only covers HTTPStatusError.
+# For other httpx failures we used to render ``str(exc)`` which often
+# embeds the request URL — and Drive's search URL embeds the q-param
+# (folder name = user content); Plane's URL embeds search= (issue
+# title = user content). User content could contain copy-pasted
+# secrets, hence the redaction.
+# ---------------------------------------------------------------------------
+
+
+def test_safe_network_summary_drops_str_exc_and_keeps_type_name() -> None:
+    """The exception's ``__str__`` is the leak surface (httpx puts the
+    request URL in there). Only the exception class name + caller
+    target make it through."""
+    request = httpx.Request(
+        "GET",
+        "https://api.example.invalid/files?q=name='SECRET-TOKEN-AS-FOLDER-NAME'",
+    )
+    exc = httpx.ConnectError(
+        "All connection attempts failed", request=request
+    )
+
+    summary = safe_network_summary(exc, target="drive")
+
+    assert "drive" in summary
+    assert "ConnectError" in summary
+    # Critical — none of the leaky URL tokens make it through.
+    assert "SECRET-TOKEN" not in summary
+    assert "q=" not in summary
+    assert "api.example.invalid" not in summary
+    assert "All connection attempts" not in summary
+
+
+def test_safe_network_summary_without_target_omits_prefix() -> None:
+    exc = httpx.ConnectTimeout("dns failure")
+    summary = safe_network_summary(exc)
+    # No leading "drive " / "plane " prefix when target is omitted.
+    assert not summary.startswith("drive")
+    assert not summary.startswith("plane")
+    assert "ConnectTimeout" in summary
+
+
+@pytest.mark.parametrize(
+    "exception_cls",
+    [
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+        httpx.PoolTimeout,
+    ],
+)
+def test_safe_network_summary_handles_common_httpx_errors(
+    exception_cls: type[httpx.HTTPError],
+) -> None:
+    """Smoke sweep across the httpx error hierarchy. Any constructor
+    quirks (some take request= kwarg, some don't) would surface here."""
+    try:
+        exc = exception_cls("synthetic failure message")
+    except TypeError:
+        request = httpx.Request("GET", "https://example.invalid/")
+        exc = exception_cls("synthetic failure message", request=request)
+
+    summary = safe_network_summary(exc, target="plane")
+
+    assert "plane" in summary
+    assert exception_cls.__name__ in summary
+    assert "synthetic failure" not in summary  # exception body dropped
+
+
+def test_safe_network_summary_output_capped_at_short_length() -> None:
+    """Cap is structural: ``<target> network error: <ClassName>``
+    never exceeds ~80 chars even for the longest httpx class names."""
+    exc = httpx.RemoteProtocolError("anything")
+    summary = safe_network_summary(exc, target="drive")
+    assert len(summary) <= 80

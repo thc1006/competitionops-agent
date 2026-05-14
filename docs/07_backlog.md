@@ -387,6 +387,33 @@ AST ordering guard that ``tmp_path`` binds before any failable op in
 lives inside a ``finally:`` block. The AST tests don't import
 docling so they run on every CI without ``--extra ocr``.
 
+**Round-2 M7 + M8 (2026-05-15) closed** — defence-in-depth against two
+adapter information-leak surfaces. **M7**: ``plane_base_url`` and
+``google_drive_api_base`` were plain ``str`` fields. An operator
+typo like ``https//www.googleapis.com`` (missing colon) flowed into
+the adapter URL builder and surfaced as an opaque httpx
+``ConnectError`` at the first API call — not at startup. Fix: a
+shared ``_validate_http_url`` helper called by ``@field_validator``
+on both fields. Requires ``http://`` or ``https://`` scheme +
+non-empty host; strips trailing slash; rejects empty string and
+mid-scheme typos. **M8 round-2**: the ``except httpx.HTTPError``
+non-status branch in Plane/Drive still rendered ``str(exc)``, which
+httpx populates with the request URL — and our search URLs embed
+user content (Drive's ``q=name='<folder>'``, Plane's
+``search=<title>``). Token-like substrings in folder names / issue
+titles would leak via that branch. Fix: new
+``adapters/_http_errors.py::safe_network_summary`` returns
+``"{target} network error: {ExceptionClassName}"`` and drops the
+body entirely. Wired into both adapters' ``HTTPError`` branches
+mirroring the round-1 ``safe_error_summary`` pattern. 25 new tests:
+16 Settings validator (well-formed accept / typo reject / empty
+reject / slash strip / None for optional / default for required) +
+9 helper unit (drop-exc-body / target-prefix / parametrized sweep
+of 6 httpx error classes / length cap). The two existing adapter
+network-error tests upgraded — previously asserted ``"synthetic"
+in error`` (the exact leak surface); now assert the class name IS
+in the error AND the leak token is NOT.
+
 **M5 (2026-05-14) closed** — PDF upload handler now reads the body in
 1 MiB chunks and raises 413 the moment accumulated bytes overshoot
 the 10 MiB cap. Before this fix, ``contents = await file.read()`` with

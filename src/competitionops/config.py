@@ -13,9 +13,54 @@ plain strings on purpose — they need to be loggable for debugging.
 """
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _validate_http_url(value: str | None, *, field_name: str) -> str | None:
+    """Round-2 M7 — validate that a Settings URL field is well-formed.
+
+    Operator typos like ``https//www.googleapis.com`` (missing colon)
+    used to flow into the adapter URL builders and only surface at
+    the first API call as an opaque httpx ``ConnectError``. This
+    validator surfaces them at Settings construction time with a
+    clear, actionable error message.
+
+    Accepts ``None`` so Optional URL fields (``plane_base_url``) stay
+    optional. For non-None values, requires:
+
+    - non-empty
+    - parses to an ``http`` or ``https`` scheme (so ``https//...`` is
+      caught — its ``urlparse().scheme`` is empty)
+    - has a netloc (so ``https://`` alone is caught)
+
+    Returns the value with a stripped trailing slash, so adapter
+    code's ``base.rstrip("/")`` is idempotent for operators who set
+    the env with or without a trailing slash.
+    """
+    if value is None:
+        return None
+    if not value:
+        raise ValueError(
+            f"{field_name} cannot be empty — omit the env var to fall "
+            "back to the default, OR set a full ``http://`` or "
+            "``https://`` URL."
+        )
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"{field_name}={value!r} is not a valid URL — must start "
+            "with ``http://`` or ``https://`` (check for missing "
+            "``://``, e.g. ``https//...``, or a misspelled scheme)."
+        )
+    if not parsed.netloc:
+        raise ValueError(
+            f"{field_name}={value!r} has no host — the URL must "
+            "include a hostname after the scheme."
+        )
+    return value.rstrip("/")
 
 
 class Settings(BaseSettings):
@@ -67,6 +112,23 @@ class Settings(BaseSettings):
     pdf_adapter: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Round-2 M7 — validate URL fields at Settings construction so
+    # operator typos surface loudly at startup, not as opaque httpx
+    # ConnectError at the first adapter call.
+    @field_validator("google_drive_api_base")
+    @classmethod
+    def _validate_drive_api_base(cls, v: str) -> str:
+        # The default is non-None so the cast is safe; the helper
+        # still handles ``None`` for symmetry with optional fields.
+        result = _validate_http_url(v, field_name="google_drive_api_base")
+        assert result is not None  # for mypy — required field, never None
+        return result
+
+    @field_validator("plane_base_url")
+    @classmethod
+    def _validate_plane_base_url(cls, v: str | None) -> str | None:
+        return _validate_http_url(v, field_name="plane_base_url")
 
 
 @lru_cache

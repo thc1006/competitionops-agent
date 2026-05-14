@@ -67,7 +67,10 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from competitionops.adapters._http_errors import safe_error_summary
+from competitionops.adapters._http_errors import (
+    safe_error_summary,
+    safe_network_summary,
+)
 from competitionops.config import Settings, get_settings
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
@@ -338,11 +341,17 @@ class PlaneAdapter:
                 message="Plane REST returned an error status.",
             )
         except httpx.HTTPError as exc:
+            # Round-2 M8 — ``str(exc)`` in httpx exceptions typically
+            # embeds the request URL, and Plane's search URL embeds
+            # ``search=<issue_title>``. A copy-pasted secret in a title
+            # would leak via that branch. ``safe_network_summary``
+            # keeps the class name (operator signal) and drops the
+            # body entirely.
             return ExternalActionResult(
                 action_id=action.action_id,
                 target_system="plane",
                 status="failed",
-                error=f"plane network error: {type(exc).__name__}: {exc}",
+                error=safe_network_summary(exc, target="plane"),
                 message="Plane network error.",
             )
 
