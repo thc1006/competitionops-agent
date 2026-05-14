@@ -13,6 +13,7 @@ swappable through AdapterRegistry so tests can inject tracking mocks.
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -31,7 +32,14 @@ from competitionops.schemas import (
     ExternalAction,
     ExternalActionResult,
 )
-from competitionops.telemetry import annotate_span, traced_async, traced_sync
+from competitionops.telemetry import (
+    action_execution_duration_seconds,
+    actions_total,
+    annotate_span,
+    audit_records_total,
+    traced_async,
+    traced_sync,
+)
 
 _TZ = ZoneInfo("Asia/Taipei")
 _tracer = trace.get_tracer("competitionops.execution")
@@ -418,6 +426,7 @@ class ExecutionService:
                 message="Adapter registry miss.",
             )
 
+        adapter_call_start = time.perf_counter()
         try:
             with _tracer.start_as_current_span(
                 "execution.adapter_call",
@@ -438,7 +447,21 @@ class ExecutionService:
                             result.error or "adapter returned failed",
                         )
                     )
+            action_execution_duration_seconds.record(
+                time.perf_counter() - adapter_call_start,
+                {
+                    "target_system": action.target_system,
+                    "result_status": result.status,
+                },
+            )
         except Exception as exc:  # noqa: BLE001 — per-action isolation
+            action_execution_duration_seconds.record(
+                time.perf_counter() - adapter_call_start,
+                {
+                    "target_system": action.target_system,
+                    "result_status": "raised",
+                },
+            )
             action.status = ActionStatus.failed
             error_msg = f"{type(exc).__name__}: {exc}"
             self._emit_audit(
@@ -579,6 +602,7 @@ class ExecutionService:
                 message="Adapter registry miss.",
             )
 
+        adapter_call_start = time.perf_counter()
         try:
             with _tracer.start_as_current_span(
                 "execution.adapter_call",
@@ -599,7 +623,21 @@ class ExecutionService:
                             result.error or "adapter returned failed",
                         )
                     )
+            action_execution_duration_seconds.record(
+                time.perf_counter() - adapter_call_start,
+                {
+                    "target_system": action.target_system,
+                    "result_status": result.status,
+                },
+            )
         except Exception as exc:  # noqa: BLE001 — adapter isolation per spec UC3 AC #3
+            action_execution_duration_seconds.record(
+                time.perf_counter() - adapter_call_start,
+                {
+                    "target_system": action.target_system,
+                    "result_status": "raised",
+                },
+            )
             action.status = ActionStatus.failed
             error_msg = f"{type(exc).__name__}: {exc}"
             self._emit_audit(
@@ -685,6 +723,20 @@ class ExecutionService:
             request_hash=request_hash,
         )
         self.audit_log.append(record)
+
+        # Sprint 5 — one counter increment per audit lifecycle event.
+        # ``state`` labels approved / rejected / blocked / skipped /
+        # executed / failed so observability backends can chart the
+        # health of the approval-gate funnel.
+        actions_total.add(
+            1,
+            {
+                "state": event_status,
+                "target_system": action.target_system,
+                "dry_run": plan.dry_run,
+            },
+        )
+        audit_records_total.add(1, {"status": event_status})
 
     @staticmethod
     def _request_hash(

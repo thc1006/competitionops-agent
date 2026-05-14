@@ -104,10 +104,14 @@ plan_id/actor attributes, adapter_call plan_id, result.status=failed →
 span STATUS=ERROR mapping, M1 OTel auto-exception coverage) ✅,
 Sprint 4 (FastAPI auto-instrumentation via FastAPIInstrumentor +
 six MCP tool spans `mcp.tool.*` with attribute coverage; shared
-decorators extracted to `telemetry/decorators.py`) ✅.
+decorators extracted to `telemetry/decorators.py`) ✅,
+Sprint 5 (Counter `competitionops.actions.total` per lifecycle state,
+Counter `competitionops.audit.records.total` per AuditRecord, Histogram
+`competitionops.action.execution.duration_seconds` per adapter dispatch;
+MeterProvider bootstrap via `setup_meter_provider(readers=...)`) ✅.
 
-Next: Sprint 5 — Counter / Histogram metrics (action_status_total,
-action_execution_duration_seconds, audit_records_total). See
+Next: Sprint 6 — (optional) console-exporter dev mode + OTLP exporter
+wiring under the `otel` extra for production. See
 `docs/10_p2_roadmap.md` for the full sprint sequence.
 
 ### P2-005 — Local OCR / layout parsing with GPU
