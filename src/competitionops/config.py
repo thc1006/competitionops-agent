@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: SecretStr | None = None
     google_oauth_redirect_uri: str = "http://localhost:8080/callback"
+    # P1-005 — short-lived bearer used by the Drive real adapter. Operators
+    # wire this from their own OAuth refresh loop (a TokenProvider port is a
+    # later step). SecretStr keeps it out of logs / model_dump output.
+    google_oauth_access_token: SecretStr | None = None
+    # Override the Drive API base URL for staging/self-hosted Drive shims.
+    # Production uses the default ``https://www.googleapis.com``.
+    google_drive_api_base: str = "https://www.googleapis.com"
 
     plane_base_url: str | None = None
     plane_api_key: SecretStr | None = None

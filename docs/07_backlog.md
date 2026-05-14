@@ -103,6 +103,24 @@ hot path).**
 
 ### P1-005 — Drive folder creation / move files
 
+Status: **In Progress (2026-05-14)** — Drive adapter upgraded from Stage 4
+stateful mock to mock-first + real-mode httpx-backed REST. Real mode
+activates when both ``Settings.google_oauth_access_token`` (SecretStr)
+and ``Settings.google_drive_api_base`` are set; partial config falls
+back to deterministic mock. ``create_folder`` does GET-by-search
+(Drive ``files.list`` with name + mimeType + parent + trashed=false)
+before POST, returning the existing folder on match (Tier 0 #5
+idempotency). Search-step failures (4xx/5xx, network, malformed JSON)
+degrade to POST so self-hosted Drive shims with broken search still
+create folders. Deep-review C1 honored: real mode short-circuits
+``dry_run=True`` to a synthetic ``dry_run_<hash>`` preview WITHOUT any
+HTTP call, so ``Settings.dry_run_default=True`` can never accidentally
+write to Drive. Tests use ``httpx.MockTransport`` so the suite stays
+offline. ``move_file`` / ``search_files`` stay mock until a follow-up
+sprint. The Stage 4 "no httpx in adapter source" guard relaxed to
+allow generic HTTP in ``google_drive`` only (Docs / Sheets / Calendar
+remain pure mocks until P1-001~003).
+
 ### P1-006 — Web ingestion through Playwright / Crawl4AI
 
 ## P2
