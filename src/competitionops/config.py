@@ -19,7 +19,9 @@ from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _validate_http_url(value: str | None, *, field_name: str) -> str | None:
+def _validate_http_url(
+    value: str | None, *, field_name: str, treat_empty_as_none: bool = False
+) -> str | None:
     """Round-2 M7 — validate that a Settings URL field is well-formed.
 
     Operator typos like ``https//www.googleapis.com`` (missing colon)
@@ -28,8 +30,20 @@ def _validate_http_url(value: str | None, *, field_name: str) -> str | None:
     validator surfaces them at Settings construction time with a
     clear, actionable error message.
 
-    Accepts ``None`` so Optional URL fields (``plane_base_url``) stay
-    optional. For non-None values, requires:
+    Args:
+        value: Raw env / kwarg input.
+        field_name: For error messages.
+        treat_empty_as_none: Round-3 H2 — when True, an empty string
+            resolves to ``None`` instead of raising. Set this for
+            Optional URL fields whose k8s secret template ships an
+            empty placeholder (``infra/k8s/base/secret.template.yaml``);
+            applying that template unmodified would otherwise
+            CrashLoopBackoff the pod. Keep False for fields that have
+            a non-empty default and where empty IS a typo
+            (``google_drive_api_base``).
+
+    For non-None values (and non-empty when ``treat_empty_as_none``),
+    requires:
 
     - non-empty
     - parses to an ``http`` or ``https`` scheme (so ``https//...`` is
@@ -43,6 +57,8 @@ def _validate_http_url(value: str | None, *, field_name: str) -> str | None:
     if value is None:
         return None
     if not value:
+        if treat_empty_as_none:
+            return None
         raise ValueError(
             f"{field_name} cannot be empty — omit the env var to fall "
             "back to the default, OR set a full ``http://`` or "
@@ -128,7 +144,15 @@ class Settings(BaseSettings):
     @field_validator("plane_base_url")
     @classmethod
     def _validate_plane_base_url(cls, v: str | None) -> str | None:
-        return _validate_http_url(v, field_name="plane_base_url")
+        # Round-3 H2 — ``treat_empty_as_none=True`` because
+        # ``infra/k8s/base/secret.template.yaml:22`` ships
+        # ``PLANE_BASE_URL: ""`` as a placeholder for the operator to
+        # fill in. Without this flag the unmodified template
+        # CrashLoopBackoffs the pod at uvicorn import time. Empty
+        # semantically means "no Plane wired" → mock mode.
+        return _validate_http_url(
+            v, field_name="plane_base_url", treat_empty_as_none=True
+        )
 
 
 @lru_cache

@@ -456,6 +456,35 @@ new tests assert each docstring contains both ``snapshot`` and a
 ``fan-out`` / ``Send`` reference, so the warning can't be
 silently removed by a refactor.
 
+**Round-3 H1 + H2 (2026-05-15) closed** — round-3 audit caught two
+operator-onboarding regressions hidden by my dev venv accidentally
+carrying stale ``--extra langgraph`` from prior sessions. **H1**:
+``langgraph`` lived only in ``[project.optional-dependencies]``, so
+``uv sync && uv run pytest`` (the documented onboarding flow) on a
+FRESH checkout aborted collection with
+``ModuleNotFoundError: No module named 'langgraph'`` after 387 tests
+gathered. All 21 prior PRs' "400 passed" results were valid only
+inside venvs that happened to keep the extra installed; CI from
+scratch was broken. Fix: ``langgraph`` + ``langgraph-checkpoint``
+added to ``[dependency-groups].dev`` (PEP 735) so the default
+``uv sync`` covers them; ``[project.optional-dependencies].langgraph``
+kept for the ``pip install .[langgraph]`` operator path. **H2**:
+round-2 PR #18's URL validator rejected empty strings on
+``plane_base_url``; ``infra/k8s/base/secret.template.yaml`` ships
+``PLANE_BASE_URL: ""`` as a placeholder. Applying the template
+unmodified → ``Settings()`` ``ValidationError`` → uvicorn import
+fails → CrashLoopBackoff. Fix: ``_validate_http_url`` gains a
+``treat_empty_as_none=True`` flag, applied to ``plane_base_url``
+(empty becomes None → mock mode, semantically "no Plane wired");
+``google_drive_api_base`` keeps strict rejection (it has a non-empty
+default; empty IS a typo). Secret template header docstring grew an
+explicit note explaining the empty-string semantics. 6 new tests
+across 2 files: 4 structural pyproject guards (langgraph in dev,
+checkpoint pinned alongside, optional-extra retained, test
+module re-imports cleanly), 2 settings guards (empty plane_base_url
+resolves to None, full secret-template env round-trips through
+Settings without raising).
+
 **M5 (2026-05-14) closed** — PDF upload handler now reads the body in
 1 MiB chunks and raises 413 the moment accumulated bytes overshoot
 the 10 MiB cap. Before this fix, ``contents = await file.read()`` with
