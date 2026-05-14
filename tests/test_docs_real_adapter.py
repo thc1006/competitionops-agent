@@ -112,6 +112,22 @@ def test_real_mode_on_with_access_token_and_base() -> None:
     assert adapter.real_mode is True
 
 
+def test_real_mode_on_with_access_token_and_default_base() -> None:
+    """Issue 1 — the honest gate. ``google_docs_api_base`` has a prod-URL
+    default that is non-empty (the URL validator rejects ``""``), so a
+    bearer alone is enough to flip real mode on. Previously the
+    ``real_mode`` property AND-ed token with base URL, implying both
+    were required — but base was always truthy, so the second clause
+    was dead code. Pin the actual contract: bearer-only."""
+    settings = Settings(
+        google_oauth_access_token=SecretStr("ya29.token-without-base-override"),
+        # No google_docs_api_base override — relies on the
+        # ``https://docs.googleapis.com`` default.
+    )
+    adapter = GoogleDocsAdapter(settings=settings)
+    assert adapter.real_mode is True
+
+
 # ---------------------------------------------------------------------------
 # create_doc — POST + bearer + body
 # ---------------------------------------------------------------------------
