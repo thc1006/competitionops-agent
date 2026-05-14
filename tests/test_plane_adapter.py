@@ -723,6 +723,91 @@ async def test_real_search_query_param_truncated_for_long_titles() -> None:
     assert issue["id"] == "long-title-issue"
 
 
+# ---------------------------------------------------------------------------
+# M8 — HTTP error body redaction in audit log
+#
+# Before this fix, ``execute`` did
+# ``error=f"plane api status {sc}: {response.text[:200]}"``. A
+# self-hosted Plane returning an HTML 500 page (stack trace,
+# internal hostnames, file paths, occasionally fragments of env vars)
+# leaked operational infrastructure into PM-visible audit records. The
+# 200-char cap was wide enough to expose db hostnames and code paths.
+# After the fix, ``safe_error_summary`` extracts ONLY structured JSON
+# string fields (``error`` / ``detail`` / ``message``) and falls back
+# to the bare status line for HTML / opaque / nested bodies.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_post_http_error_redacts_html_body_in_audit() -> None:
+    """Audit ``error`` must not contain any HTML body content — only
+    the status line."""
+    html_with_leak = (
+        "<html><h1>500</h1>"
+        "<pre>File '/srv/plane/secrets.py' line 42: "
+        "InternalServerError: cannot reach db-internal.prod.svc.cluster.local"
+        "</pre></html>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(500, content=html_with_leak.encode("utf-8"))
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(_make_action(), dry_run=False)
+
+    assert result.status == "failed"
+    assert "500" in (result.error or "")
+    for leak in ("secrets.py", "db-internal", "<html>", "Stack trace"):
+        assert leak not in (result.error or ""), (
+            f"M8 leak: {leak!r} surfaced into audit error field"
+        )
+
+
+@pytest.mark.asyncio
+async def test_real_post_http_error_extracts_json_detail_field() -> None:
+    """Plane returns structured JSON for legitimate validation errors.
+    Those SHOULD surface — they're the operator's diagnostic signal."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            422, json={"detail": "name must be at most 255 characters"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(_make_action(), dry_run=False)
+
+    assert result.status == "failed"
+    assert "422" in (result.error or "")
+    assert "name must be at most 255 characters" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_real_post_http_error_audit_field_capped_at_200_chars() -> None:
+    """Attacker-controlled long JSON error message can't bloat audit
+    log entries."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(500, json={"error": "y" * 5000})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = PlaneAdapter(settings=_settings_real(), client=client)
+        result = await adapter.execute(_make_action(), dry_run=False)
+
+    assert result.status == "failed"
+    assert len(result.error or "") <= 200
+
+
 @pytest.mark.asyncio
 async def test_real_create_issue_truncated_search_still_dedupes_exact_match() -> None:
     """The exact-match filter on the search response uses the FULL

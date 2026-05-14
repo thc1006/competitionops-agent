@@ -361,3 +361,100 @@ async def test_real_execute_dispatches_to_post_and_returns_external_id() -> None
     assert result.status == "executed"
     assert result.external_id == "exec-id-9"
     assert (result.message or "").endswith("(real).")
+
+
+# ---------------------------------------------------------------------------
+# M8 — Drive shares the same HTTP-error-body redaction shape as Plane.
+# The deep review specifically called out plane.py, but google_drive.py
+# had the identical ``response.text[:200]`` pattern and benefits from
+# the same shared helper. Same three tests as the Plane side, against
+# the Drive endpoint.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_drive_http_error_redacts_html_body() -> None:
+    """An interposing proxy / captive portal returning HTML 502 must
+    not leak its body content into the Drive audit error field."""
+    html_with_leak = (
+        "<html><h1>502</h1>"
+        "<pre>upstream connect error to 10.0.42.7:443 "
+        "(internal-drive-shim.corp.example)</pre></html>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"files": []})
+        return httpx.Response(502, content=html_with_leak.encode("utf-8"))
+
+    client = _mock_transport(handler)
+    adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
+    action = ExternalAction(
+        action_id="act_drive_html_502",
+        type="google.drive.create_competition_folder",
+        target_system="google_drive",
+        payload={"folder_name": "HTML 502"},
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    result = await adapter.execute(action, dry_run=False)
+
+    assert result.status == "failed"
+    assert "502" in (result.error or "")
+    for leak in ("10.0.42.7", "internal-drive-shim", "<html>", "upstream"):
+        assert leak not in (result.error or ""), (
+            f"M8 leak: {leak!r} surfaced into Drive audit error field"
+        )
+
+
+@pytest.mark.asyncio
+async def test_real_drive_http_error_extracts_google_json_error() -> None:
+    """Real Drive 4xx returns ``{"error": {"message": "..."}}`` (Google
+    APIs convention). The helper extracts ONLY string fields, so the
+    nested object case falls back to the bare status line — but for a
+    flat ``{"error": "msg"}`` (which some Drive shims emit) the string
+    does surface."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"files": []})
+        return httpx.Response(403, json={"error": "rate limit exceeded"})
+
+    client = _mock_transport(handler)
+    adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
+    action = ExternalAction(
+        action_id="act_drive_rate_limit",
+        type="google.drive.create_competition_folder",
+        target_system="google_drive",
+        payload={"folder_name": "RateLimited"},
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    result = await adapter.execute(action, dry_run=False)
+
+    assert result.status == "failed"
+    assert "403" in (result.error or "")
+    assert "rate limit exceeded" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_real_drive_http_error_audit_field_capped_at_200_chars() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"files": []})
+        return httpx.Response(500, json={"error": "z" * 5000})
+
+    client = _mock_transport(handler)
+    adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
+    action = ExternalAction(
+        action_id="act_drive_big_error",
+        type="google.drive.create_competition_folder",
+        target_system="google_drive",
+        payload={"folder_name": "Big Error"},
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    result = await adapter.execute(action, dry_run=False)
+
+    assert result.status == "failed"
+    assert len(result.error or "") <= 200

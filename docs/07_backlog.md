@@ -106,7 +106,16 @@ lose idempotency via 414, and (b) raises immediately on 401 / 403
 instead of degrading to POST, so auth misconfiguration surfaces at the
 real failure point. Non-auth 4xx / 5xx / network / malformed JSON all
 keep degrading to POST (self-hosted Plane with search disabled still
-creates issues).**
+creates issues).** **M8 (2026-05-14) closed — HTTPStatusError audit
+field now goes through ``adapters/_http_errors.py::safe_error_summary``
+which extracts ONLY string values from JSON ``error``/``detail``/
+``message`` fields and falls back to ``<status> <reason>`` for HTML /
+opaque / nested bodies. Previously a self-hosted Plane 5xx HTML stack
+trace could leak internal hostnames, file paths, and occasional env
+fragments into PM-visible audit records via the 200-char raw body
+echo. Output now hard-capped at 200 chars regardless of input size.
+Same helper wired into ``google_drive.py`` for symmetry — captive
+portals / corporate proxies also interpose HTML on Drive endpoints.**
 
 ### P1-005 — Drive folder creation / move files
 

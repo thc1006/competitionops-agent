@@ -35,6 +35,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from competitionops.adapters._http_errors import safe_error_summary
 from competitionops.config import Settings, get_settings
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
@@ -281,14 +282,17 @@ class GoogleDriveAdapter:
                 message="Drive adapter rejected payload.",
             )
         except httpx.HTTPStatusError as exc:
+            # M8 — never echo the raw response body. ``safe_error_summary``
+            # surfaces structured JSON error fields ONLY and falls back to
+            # ``<status> <reason>`` for HTML / opaque payloads. Captive
+            # portals and corporate proxies often interpose HTML 4xx / 5xx
+            # pages on Drive endpoints; this prevents their body content
+            # from leaking into the audit log.
             return ExternalActionResult(
                 action_id=action.action_id,
                 target_system="google_drive",
                 status="failed",
-                error=(
-                    f"drive api status {exc.response.status_code}: "
-                    f"{exc.response.text[:200]}"
-                ),
+                error=safe_error_summary(exc.response, target="drive"),
                 message="Drive REST returned an error status.",
             )
         except httpx.HTTPError as exc:
