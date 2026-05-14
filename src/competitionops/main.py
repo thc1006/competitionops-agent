@@ -130,6 +130,12 @@ FastAPIInstrumentor.instrument_app(app)
 
 @lru_cache(maxsize=1)
 def _plan_repo() -> InMemoryPlanRepository:
+    # H2 — InMemoryPlanRepository is process-bound (a dict[str, ActionPlan]).
+    # The prod overlay is pinned to replicas=1 because of this; lifting that
+    # pin needs a shared-state PlanRepository adapter (SQLite-on-PVC,
+    # Postgres, Redis) wired here via an env-driven switch, mirroring how
+    # ``_audit_log`` selects FileAuditLog vs InMemoryAuditLog from
+    # ``Settings.audit_log_dir`` (Tier 0 #4).
     return InMemoryPlanRepository()
 
 
