@@ -3,13 +3,26 @@ kind: Deployment
 metadata:
   name: competitionops-api
 spec:
-  # Prod: 3 replicas behind the LB. PVC must be ReadWriteMany so all
-  # three pods can append to the same per-plan JSONL files.
-  replicas: 3
+  # H2 — Pinned to 1 replica.
+  #
+  # ``_plan_repo()`` in ``src/competitionops/main.py`` is a singleton
+  # over ``InMemoryPlanRepository`` (a process-bound dict). With >1 pod
+  # a plan created on pod A is invisible to pod B, so
+  # ``POST /plans/{plan_id}/approve`` returns 404 whenever the LB lands
+  # the approval request on a different pod than the one that handled
+  # ``POST /plans/generate``.
+  #
+  # To lift this pin, ship a shared-state ``PlanRepository`` adapter
+  # (SQLite-on-PVC, Postgres, or Redis) wired into ``_plan_repo`` via
+  # the same env-driven switch ``_audit_log`` uses for Tier 0 #4. Once
+  # operators set the relevant env var, this replicas line can go back
+  # to 3 and ``podAntiAffinity`` below starts doing real work.
+  replicas: 1
   template:
     spec:
       affinity:
-        # Spread replicas across nodes for blast-radius reduction.
+        # Spread intent retained for the day H2 unblocks scaling — a
+        # no-op while replicas=1 but lights up immediately when bumped.
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100

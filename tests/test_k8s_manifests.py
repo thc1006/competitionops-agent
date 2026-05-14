@@ -241,11 +241,53 @@ def test_overlay_staging_uses_base_pvc_unchanged() -> None:
     assert "patches" not in kustomization or not kustomization.get("patches")
 
 
-def test_overlay_prod_uses_three_replicas_with_anti_affinity() -> None:
+def test_overlay_prod_pinned_to_one_replica_until_shared_plan_repo_lands() -> None:
+    """H2 regression guard.
+
+    Prod overlay is pinned to ``replicas: 1`` because ``_plan_repo()`` in
+    ``src/competitionops/main.py`` is an ``@lru_cache(maxsize=1)``
+    singleton wrapping ``InMemoryPlanRepository`` — a process-bound
+    ``dict[str, ActionPlan]``. With >1 pod, a plan created on pod A is
+    invisible to pod B, so ``POST /plans/{plan_id}/approve`` returns
+    404 ``PlanNotFoundError`` whenever the LB lands the request on a
+    different pod than the one that created the plan.
+
+    To lift this gate we need a real shared-state ``PlanRepository``
+    adapter (SQLite-on-PVC, Postgres, or Redis) wired into ``_plan_repo``
+    via the same env-driven switch ``_audit_log`` uses (Tier 0 #4).
+
+    The ``podAntiAffinity`` block stays in the patch so the spread
+    intent survives across the temporary 1-replica window; it's a no-op
+    while replicas=1 but lights up immediately the moment replicas is
+    bumped.
+    """
     patch = _load_yaml(_OVERLAYS / "prod" / "deployment-patch.yaml")
-    assert patch["spec"]["replicas"] == 3
+    assert patch["spec"]["replicas"] == 1, (
+        "Prod must stay at replicas=1 until a shared PlanRepository "
+        "implementation lands. See H2 comment in this test for context."
+    )
     affinity = patch["spec"]["template"]["spec"]["affinity"]
     assert "podAntiAffinity" in affinity
+
+
+def test_overlay_prod_patch_documents_the_h2_pin_in_a_comment() -> None:
+    """Defensive: the YAML structure alone doesn't explain WHY prod is
+    pinned, so future operators reading the patch might assume the 1
+    is a typo and bump it. The patch file must carry an H2 reference
+    in a comment so the constraint is visible at the manifest layer."""
+    content = (_OVERLAYS / "prod" / "deployment-patch.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "H2" in content, (
+        "deployment-patch.yaml must reference H2 in a comment so the "
+        "replicas=1 pin doesn't get silently reverted."
+    )
+    # The comment should also point at the underlying cause so a reader
+    # doesn't have to dig through tests / docs to discover why.
+    assert "PlanRepository" in content or "plan_repo" in content, (
+        "The H2 comment should name the dependency that has to land "
+        "before replicas can go above 1."
+    )
 
 
 def test_overlay_prod_ingress_has_tls_block() -> None:

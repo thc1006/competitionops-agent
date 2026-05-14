@@ -164,14 +164,14 @@ caps, read-only root fs, automountServiceAccountToken=false,
 RuntimeDefault seccomp, readinessProbe on ``/health`` + livenessProbe
 on ``/healthz``. PVC ``competitionops-audit`` (5Gi RWX) backs Tier 0
 #4's ``AUDIT_LOG_DIR``; dev overlay swaps PVC for emptyDir for
-minikube / kind without RWX. Prod overlay: 3 replicas + podAntiAffinity
-+ nginx ingress with cert-manager letsencrypt-prod + 20rps rate limit.
-Staging: same shape with letsencrypt-staging. ``secret.template.yaml``
-ships with seven empty key placeholders — real values flow via
-external-secrets / sealed-secrets / kubectl. Multi-stage Dockerfile
-builds with uv into a distroless runtime. 30 manifest tests parse YAML
-directly (no kustomize CLI dep), 31st smoke test calls
-``kustomize build`` per overlay if the binary is available.
+minikube / kind without RWX. Prod overlay: 1 replica (H2-pinned, see below) +
+podAntiAffinity + nginx ingress with cert-manager letsencrypt-prod +
+20rps rate limit. Staging: same shape with letsencrypt-staging.
+``secret.template.yaml`` ships with seven empty key placeholders —
+real values flow via external-secrets / sealed-secrets / kubectl.
+Multi-stage Dockerfile builds with uv into a distroless runtime. 31
+manifest tests parse YAML directly (no kustomize CLI dep), 32nd smoke
+test calls ``kustomize build`` per overlay if the binary is available.
 
 **H1 (2026-05-14) closed** — Each overlay now ships its own
 ``namespace.yaml`` declaring ``Namespace/competitionops-{env}``. Base
@@ -183,6 +183,19 @@ Namespace rendered into every overlay (because kustomize's
 ``kubectl apply -k overlays/dev/`` would create
 ``Namespace/competitionops`` and then fail to place the Deployment
 into ``competitionops-dev`` which never got created.
+
+**H2 (2026-05-14) closed** — Prod overlay re-pinned to ``replicas: 1``.
+``_plan_repo()`` is a process-bound singleton over
+``InMemoryPlanRepository``; with >1 pod a plan created on pod A is
+invisible to pod B and ``POST /plans/{plan_id}/approve`` returns 404
+whenever the LB lands the approval on a different pod. The
+``podAntiAffinity`` block stays in the patch so the spread intent
+survives until a shared ``PlanRepository`` adapter (SQLite-on-PVC,
+Postgres, or Redis) lands — at which point replicas can climb back.
+Audit-log RWX PVC stays provisioned for the same future scale-up.
+Inline comments at ``infra/k8s/overlays/prod/deployment-patch.yaml`` +
+``src/competitionops/main.py::_plan_repo`` cross-reference the
+dependency so it can't get silently bumped.
 
 ### P2-004 — Observability with OpenTelemetry
 

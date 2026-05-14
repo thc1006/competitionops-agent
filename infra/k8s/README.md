@@ -24,7 +24,7 @@ infra/k8s/
     │   └── ingress.yaml            letsencrypt-staging
     └── prod/
         ├── kustomization.yaml
-        ├── deployment-patch.yaml   replicas=3 + podAntiAffinity
+        ├── deployment-patch.yaml   replicas=1 (H2-pinned) + podAntiAffinity
         └── ingress.yaml            letsencrypt-prod + rate-limit
 ```
 
@@ -53,11 +53,26 @@ infra/k8s/
 The PVC ``competitionops-audit`` (5Gi, ReadWriteMany) backs
 ``AUDIT_LOG_DIR=/var/lib/competitionops/audit``. Each plan_id gets its
 own ``<plan_id>.jsonl`` file (one line per ``AuditRecord``). The
-``ReadWriteMany`` access mode is required so the prod overlay's 3
-replicas can all append to the same files. The dev overlay swaps the
-PVC for an ``emptyDir`` so minikube / kind / Docker Desktop work
-without an RWX storage class — at the cost of losing audit on pod
-restart.
+``ReadWriteMany`` access mode was provisioned for the day H2 unblocks
+multi-replica prod — for now prod is pinned to a single replica
+(``replicas=1``) so the concurrent-append concern (deep-review H3) is
+also dormant. The dev overlay swaps the PVC for an ``emptyDir`` so
+minikube / kind / Docker Desktop work without an RWX storage class — at
+the cost of losing audit on pod restart.
+
+## H2 — single-replica prod gate
+
+``src/competitionops/main.py::_plan_repo()`` is an
+``@lru_cache(maxsize=1)`` singleton over ``InMemoryPlanRepository`` — a
+process-bound ``dict[str, ActionPlan]``. With multiple pods, a plan
+created on pod A is invisible to pod B, so any
+``POST /plans/{plan_id}/approve`` routed to a different pod returns
+404. The prod overlay is therefore pinned to ``replicas: 1``. To lift
+this gate, implement a shared ``PlanRepository`` (SQLite-on-PVC,
+Postgres, or Redis) and wire it into ``_plan_repo()`` via the same
+env-driven switch ``_audit_log`` already uses (Tier 0 #4). Once that
+lands, bump prod replicas back to 3+ and the existing
+``podAntiAffinity`` block starts spreading the pods across nodes.
 
 ## Secrets
 
