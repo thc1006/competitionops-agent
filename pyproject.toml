@@ -57,6 +57,16 @@ dev = [
     "ruff>=0.6.0",
     "mypy>=1.11.0",
     "coverage>=7.6.0",
+    # Round-3 H1 — workflow runtime. ``tests/test_workflow_graph.py``
+    # imports ``langgraph.graph`` eagerly, so the suite needs it
+    # installed by the default ``uv sync`` (no flags). Production
+    # images that don't want the workflow path can still opt out via
+    # ``uv sync --no-dev``. The matching ``[project.optional-dependencies].langgraph``
+    # entry below stays for the operator-facing ``pip install .[langgraph]``
+    # path; the dev group ensures contributors don't have to know it
+    # exists.
+    "langgraph>=0.5.0",
+    "langgraph-checkpoint>=2.0.0",
 ]
 
 [tool.ruff]

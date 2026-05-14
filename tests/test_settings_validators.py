@@ -123,11 +123,54 @@ def test_plane_base_url_rejects_missing_scheme_colon() -> None:
         Settings(plane_base_url="https//plane.example.invalid")
 
 
-def test_plane_base_url_rejects_empty_string() -> None:
-    with pytest.raises(ValidationError):
-        Settings(plane_base_url="")
+def test_plane_base_url_accepts_empty_string_as_none() -> None:
+    """Round-3 H2 — ``infra/k8s/base/secret.template.yaml`` ships
+    ``PLANE_BASE_URL: ""`` as a placeholder for operators to fill in
+    via external-secrets / sealed-secrets / kubectl. Before this fix
+    PR #18's validator rejected the empty string, so applying the
+    unmodified template made the pod CrashLoopBackoff at uvicorn
+    import time. The validator now treats empty as "no Plane wired"
+    (i.e. mock mode) — semantically equivalent to omitting the env."""
+    s = Settings(plane_base_url="")
+    assert s.plane_base_url is None
 
 
 def test_plane_base_url_strips_trailing_slash() -> None:
     s = Settings(plane_base_url="https://plane.example.invalid/")
     assert s.plane_base_url == "https://plane.example.invalid"
+
+
+def test_settings_load_with_empty_secret_template_does_not_crash() -> None:
+    """End-to-end H2 regression — every env-var that
+    ``secret.template.yaml`` ships as empty must round-trip cleanly
+    through ``Settings()``. Catches future validators that reject
+    empty without considering the k8s-secret-template workflow.
+
+    Mirrors what happens on first pod boot: the template's empty
+    string lands in ``os.environ`` via ``envFrom: secretRef``.
+    """
+    import os
+
+    empty_env = {
+        "ANTHROPIC_API_KEY": "",
+        "GOOGLE_OAUTH_CLIENT_ID": "",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "",
+        "PLANE_API_KEY": "",
+        "PLANE_BASE_URL": "",
+        "PLANE_WORKSPACE_SLUG": "",
+        "PLANE_PROJECT_ID": "",
+    }
+    saved = {k: os.environ.get(k) for k in empty_env}
+    try:
+        os.environ.update(empty_env)
+        # Must not raise.
+        s = Settings()
+        # Empty PLANE_BASE_URL becomes None — adapter resolves to mock.
+        assert s.plane_base_url is None
+    finally:
+        # Restore (or remove) the original env values.
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
