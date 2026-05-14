@@ -121,3 +121,44 @@ def meter_provider_install_captor(
         lambda provider: installed.setdefault("provider", provider),
     )
     yield installed
+
+
+@pytest.fixture
+def isolated_tracer_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Any]:
+    """Yield a fresh SDK ``TracerProvider`` that tests can wire span
+    processors / exporters onto without leaking into the process-wide
+    global.
+
+    Why this exists (round-3 M2). ``test_otel_wiring.py`` exercises
+    ``_wire_otel_exporters`` which calls
+    ``trace.get_tracer_provider().add_span_processor(...)``. Before
+    this fixture the processor (and its ConsoleSpanExporter /
+    BatchSpanProcessor worker thread) attached to the **real** global
+    set by ``setup_tracer_provider`` at module import. The exporter
+    thread kept holding ``sys.stderr`` after pytest closed its
+    captured fd, so background flushes during teardown raised
+    ``ValueError: I/O operation on closed file`` — visible in
+    ``scripts/verify.sh`` even though tests pass.
+
+    Mechanics. ``trace.set_tracer_provider`` is once-only at SDK
+    level, so we don't try to install. We monkeypatch
+    ``trace.get_tracer_provider`` (the lookup the wiring code uses)
+    to return a per-test SDK provider, and on teardown shut the
+    per-test provider down — this stops its BatchSpanProcessor's
+    worker thread BEFORE pytest closes the captured stderr fd.
+
+    Symmetric to ``isolated_meter_provider`` / ``meter_provider_install_captor``
+    above. Opt in by name — most tests don't touch TracerProvider so
+    autouse would mask real install-order interactions.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+
+    provider = TracerProvider()
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    try:
+        yield provider
+    finally:
+        provider.shutdown()

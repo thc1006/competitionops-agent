@@ -178,6 +178,28 @@ def get_pdf_adapter() -> PdfIngestionPort:
     return _pdf_adapter()
 
 
+def _eager_validate_runtime_config() -> None:
+    """Round-3 M1 — fail fast at module import on invalid runtime
+    config so the pod never reaches a state where ``/health`` is green
+    but a request-path adapter would explode.
+
+    Concretely: call ``_pdf_adapter()`` once. The factory already
+    raises ``ValueError`` on unknown ``PDF_ADAPTER`` values and
+    ``ImportError`` if ``PDF_ADAPTER=docling`` is set without
+    ``--extra ocr`` installed. Surfacing both at module import means
+    uvicorn aborts before binding the port → CrashLoopBackoff with
+    the offending value in the log, instead of a silent "first PDF
+    request 503s" hours later.
+
+    Idempotent (lru_cache(1) on the factory) and side-effect-free for
+    the default ``mock`` adapter. Safe to keep at module top level.
+    """
+    _pdf_adapter()
+
+
+_eager_validate_runtime_config()
+
+
 def get_execution_service(
     plan_repo: PlanRepository = Depends(get_plan_repo),
     registry: AdapterRegistry = Depends(get_registry),
