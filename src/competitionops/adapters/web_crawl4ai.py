@@ -49,6 +49,36 @@ def _resolve_async_web_crawler() -> Any:
     return AsyncWebCrawler
 
 
+def _extract_markdown_text(result: Any) -> str:
+    """Extract a plain string from a Crawl4AI ``CrawlResult.markdown``.
+
+    PR #32 deep-review polish A — Crawl4AI 0.5+ migrated
+    ``result.markdown`` from a plain ``str`` to a
+    ``MarkdownGenerationResult`` object exposing ``.raw_markdown`` /
+    ``.fit_markdown`` / etc. The exact shape varies across 0.5/0.6/0.7
+    patch releases, so the adapter probes for both. Order:
+
+    1. If ``markdown`` has ``raw_markdown`` (the object form), prefer it.
+       Fall back to ``fit_markdown`` if raw is empty.
+    2. Otherwise coerce via ``str()`` — handles the v0.4-style plain
+       string AND any future shape that supports ``__str__``.
+    3. Empty / None → empty string.
+
+    Returns a guaranteed ``str`` so Pydantic's
+    ``WebIngestionResult.text: str`` accepts it without coercion games.
+    """
+    markdown = getattr(result, "markdown", None)
+    if markdown is None or markdown == "":
+        return ""
+    if hasattr(markdown, "raw_markdown"):
+        return (
+            getattr(markdown, "raw_markdown", "")
+            or getattr(markdown, "fit_markdown", "")
+            or ""
+        )
+    return str(markdown)
+
+
 class Crawl4AIWebAdapter:
     """Real-mode ``WebIngestionPort`` implementation backed by Crawl4AI.
 
@@ -68,8 +98,20 @@ class Crawl4AIWebAdapter:
                 "WEB_ADAPTER (defaults to ``mock``)."
             ) from exc
 
-        async with async_web_crawler_cls() as crawler:
-            result = await crawler.arun(url=url)
+        # PR #32 deep-review polish C — Playwright (under Crawl4AI) can
+        # raise its own exception types whose ``str(exc)`` embeds the
+        # request URL or DOM state. Bubbling those uncaught to FastAPI
+        # surfaces the leak via the 500 traceback. Catch broad here and
+        # re-raise class-name-only (same M8/M4 redaction discipline the
+        # Google adapters follow). ``raise … from exc`` preserves the
+        # chain for server-side logs.
+        try:
+            async with async_web_crawler_cls() as crawler:
+                result = await crawler.arun(url=url)
+        except Exception as exc:
+            raise RuntimeError(
+                f"web fetch failed: {type(exc).__name__}"
+            ) from exc
 
         if not getattr(result, "success", False):
             error_message = getattr(result, "error_message", None) or "unknown"
@@ -82,5 +124,5 @@ class Crawl4AIWebAdapter:
         return WebIngestionResult(
             url=canonical_url,
             title=metadata.get("title", "") or "",
-            text=getattr(result, "markdown", "") or "",
+            text=_extract_markdown_text(result),
         )

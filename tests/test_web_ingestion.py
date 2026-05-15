@@ -280,6 +280,107 @@ def test_crawl4ai_adapter_raises_on_failed_crawl(
         asyncio.run(adapter.fetch("https://example.com/x"))
 
 
+def test_crawl4ai_adapter_handles_markdown_generation_result_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #32 deep-review polish A — Crawl4AI 0.5+ changed
+    ``result.markdown`` from a plain ``str`` to a
+    ``MarkdownGenerationResult`` object with ``.raw_markdown`` /
+    ``.fit_markdown`` attributes. The adapter must extract the string
+    content rather than passing the object directly to Pydantic
+    (which would either coerce to an opaque repr or fail validation).
+
+    This test pins the defensive coercion: if ``markdown`` has a
+    ``raw_markdown`` attr, use it; else stringify whatever's there.
+    """
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    class FakeMarkdownGenerationResult:
+        raw_markdown = "# Cleaned content\n\nDeadline 2026-06-15."
+        fit_markdown = "# Filtered\n\nKey detail."
+
+    class FakeCrawlResult:
+        success = True
+        url = "https://example.com/x"
+        markdown = FakeMarkdownGenerationResult()  # object, NOT str
+        metadata = {"title": "Test"}
+        error_message: str | None = None
+
+    class FakeAsyncWebCrawler:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def arun(self, *, url: str, **_kwargs):  # type: ignore[no-untyped-def]
+            return FakeCrawlResult()
+
+    monkeypatch.setattr(
+        web_crawl4ai, "_resolve_async_web_crawler", lambda: FakeAsyncWebCrawler
+    )
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    result = asyncio.run(adapter.fetch("https://example.com/x"))
+
+    # The adapter must surface the raw_markdown content as a string,
+    # not the object's repr or a stringified placeholder.
+    assert "Cleaned content" in result.text
+    assert "2026-06-15" in result.text
+    assert isinstance(result.text, str)
+    # Repr leakage check — the object's class name must NOT appear.
+    assert "FakeMarkdownGenerationResult" not in result.text
+
+
+def test_crawl4ai_adapter_redacts_playwright_exception_class_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #32 deep-review polish C — leak surface. Crawl4AI's
+    Playwright backend can raise its own exception types
+    (``TimeoutError``, ``TargetClosedError``, ``Playwright.Error``)
+    whose ``str(exc)`` may embed the URL, the page's DOM state, or
+    internal Playwright details. Bubbling those uncaught to FastAPI
+    surfaces them in the 500 response body.
+
+    The adapter must catch broad exceptions during the fetch and
+    surface ONLY the class name — same M8/M4 redaction discipline
+    the Google adapters follow.
+    """
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    class FakePlaywrightError(Exception):
+        """Stand-in for playwright._impl._api_types.Error etc."""
+
+    class FakeAsyncWebCrawler:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def arun(self, *, url: str, **_kwargs):  # type: ignore[no-untyped-def]
+            raise FakePlaywrightError(
+                "browser crashed while navigating to "
+                "https://attacker.example.com/SECRET-INTERNAL-DOM-STATE-LEAK"
+            )
+
+    monkeypatch.setattr(
+        web_crawl4ai, "_resolve_async_web_crawler", lambda: FakeAsyncWebCrawler
+    )
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(adapter.fetch("https://attacker.example.com/x"))
+    msg = str(excinfo.value)
+    # Class name is the operator's diagnostic signal — must surface.
+    assert "FakePlaywrightError" in msg
+    # The exception body is the leak surface — must NOT surface.
+    assert "SECRET-INTERNAL-DOM-STATE-LEAK" not in msg
+    assert "browser crashed" not in msg
+
+
 def test_main_module_eager_validates_web_adapter() -> None:
     """The eager-validate function in ``main.py`` (round-3 M1) must
     CALL ``_web_adapter()`` alongside ``_pdf_adapter()`` so a typo'd

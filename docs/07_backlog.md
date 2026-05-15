@@ -339,6 +339,11 @@ Sprint 0 surface:
   (empty in Sprint 0) so the documented install command
   ``uv sync --extra web`` is valid today; Sprint 2 fills the list.
 
+Sprint 0 tests: 14 new in ``tests/test_web_ingestion.py`` — port
+shape (2), mock adapter behaviour (3), runtime factory +
+eager-validate (4), endpoint plumbing including scheme validation
+(4), pyproject extras declaration (1). All offline.
+
 Sprint 1: **Done (2026-05-15)** — SSRF filter landed in
 ``_UrlIngestRequest`` validator. Two module-level helpers in
 ``main.py`` (kept module-local since only this endpoint uses them):
@@ -402,7 +407,10 @@ at the infrastructure layer:
 - Egress proxy that does IP validation per connect.
 - Dedicated network namespace with restricted routing table.
 
-See ``infra/k8s/README.md`` for the recommended NetworkPolicy snippet.
+See ``infra/k8s/README.md`` ("Enabling Crawl4AI") for the recommended
+NetworkPolicy snippet AND the Playwright browser-cache setup
+(``readOnlyRootFilesystem: true`` requires either a bake-into-image
+build or an emptyDir mount + ``PLAYWRIGHT_BROWSERS_PATH``).
 
 Tests: 4 new in ``tests/test_web_ingestion.py``, replacing the
 Sprint-0 placeholder ``test_runtime_web_adapter_factory_rejects_crawl4ai_in_sprint_0``
@@ -414,11 +422,6 @@ per its docstring directive. Coverage:
 
 The four tests monkeypatch ``_resolve_async_web_crawler`` so they
 run without installing the heavy ``[web]`` extra in CI.
-
-Tests: 14 new in ``tests/test_web_ingestion.py`` — port shape (2),
-mock adapter behaviour (3), runtime factory + eager-validate (4),
-endpoint plumbing including scheme validation (4), pyproject extras
-declaration (1). All offline.
 
 ## P2
 

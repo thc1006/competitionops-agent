@@ -253,6 +253,54 @@ re-validate at connect time. Treat the NetworkPolicy as part of the
 deploy contract: ``WEB_ADAPTER=crawl4ai`` without it is a security
 regression, not a configuration choice.
 
+### Browser cache vs ``readOnlyRootFilesystem: true``
+
+The base ``deployment.yaml`` hardening sets ``readOnlyRootFilesystem: true``
+(see "Hardening highlights" above). Playwright (under Crawl4AI) writes
+browser binaries + per-session state to ``~/.cache/ms-playwright/`` by
+default — a path on the read-only root that the runtime user
+(``runAsUser: 65532``) can't create. The first ``/briefs/extract/url``
+request fails with ``EROFS: read-only file system`` mid-fetch.
+
+Two ways to close this:
+
+**Option A (recommended) — bake the browser into the image at build time.**
+The default ``infra/docker/Dockerfile`` does not run ``playwright install``;
+extend it (or maintain a separate ``Dockerfile.web``) with a stage that
+runs ``playwright install --with-deps chromium`` AFTER the
+``--extra web`` install, writing into a writable image layer. The
+result is a self-contained image — no writable mount needed at runtime.
+
+**Option B — runtime writable cache via emptyDir.** Add a sized
+emptyDir mount + point Playwright at it via env var:
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /var/cache/playwright
+          volumeMounts:
+            - name: playwright-cache
+              mountPath: /var/cache/playwright
+      volumes:
+        - name: playwright-cache
+          emptyDir:
+            sizeLimit: 512Mi   # Chromium + dependencies ≈ 300MB
+```
+
+Chromium binaries pre-download on first fetch (~30s cold start), then
+sit in the emptyDir for the pod's lifetime. Each pod restart re-downloads
+— acceptable for low-volume web ingestion. Operators running high
+throughput should prefer Option A.
+
+Either option must be in place BEFORE flipping ``WEB_ADAPTER=crawl4ai``.
+The base manifests deliberately stay minimal (no Playwright wiring) so
+operators who don't need real web ingestion don't pay the storage cost.
+
 ## Secrets
 
 ``secret.template.yaml`` ships in the repo with seven empty fields.
