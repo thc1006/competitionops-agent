@@ -124,18 +124,37 @@ def test_setup_meter_provider_attaches_resource(
     isolated_meter_provider: None,
 ) -> None:
     """``setup_meter_provider`` must construct its ``MeterProvider``
-    WITH the resource. The conftest ``isolated_meter_provider`` fixture
-    reports a proxy provider (so the construct branch fires) and
-    swallows the install — the function returns the freshly-built
-    provider."""
+    WITH the resource.
+
+    Behavioural test via ``InMemoryMetricReader`` — record a metric,
+    collect, and read the resource off the public
+    ``MetricsData.resource_metrics[*].resource`` path. This exercises
+    the actual export pipeline and avoids reaching into the private
+    ``MeterProvider._sdk_config`` internal (which would break on an
+    OTel version bump). ``MeterProvider`` has no public resource
+    accessor of its own, so the exported ``ResourceMetrics`` is the
+    correct seam.
+
+    The conftest ``isolated_meter_provider`` fixture reports a proxy
+    provider so ``setup_meter_provider``'s construct branch fires and
+    the install is swallowed."""
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
     monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
-    provider = setup_meter_provider()
-    # MeterProvider exposes the resource via its private _sdk_config
-    # in current OTel; use the public-ish accessor when available.
-    resource = getattr(provider, "_sdk_config", None)
-    if resource is not None:
-        attrs = resource.resource.attributes
-    else:  # pragma: no cover - fallback for OTel API shifts
-        attrs = provider.resource.attributes  # type: ignore[attr-defined]
-    assert attrs.get("service.name") == "competitionops-api"
-    assert attrs.get("service.version")
+    reader = InMemoryMetricReader()
+    provider = setup_meter_provider(readers=[reader])
+
+    # Record one metric so the reader has a ResourceMetrics to collect.
+    counter = provider.get_meter("test.otel_resource").create_counter(
+        "test.resource.probe"
+    )
+    counter.add(1)
+
+    metrics_data = reader.get_metrics_data()
+    assert metrics_data is not None and metrics_data.resource_metrics, (
+        "InMemoryMetricReader collected no ResourceMetrics — the "
+        "counter add did not flush through the provider."
+    )
+    resource = metrics_data.resource_metrics[0].resource
+    assert resource.attributes.get("service.name") == "competitionops-api"
+    assert resource.attributes.get("service.version")
