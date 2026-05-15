@@ -157,19 +157,54 @@ def test_runtime_web_adapter_factory_raises_on_unknown_value(
         runtime._web_adapter()
 
 
+def test_runtime_web_adapter_factory_rejects_crawl4ai_in_sprint_0(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WEB_ADAPTER=crawl4ai`` is reserved for Sprint 2. Sprint 0
+    explicitly raises ``RuntimeError`` with operator guidance so a
+    half-real config (env-toggled but no implementation) never reaches
+    the request path. When Sprint 2 lands and implements
+    ``Crawl4AIWebAdapter``, this test should be REPLACED (not deleted)
+    by a positive test asserting the real adapter is constructed.
+    Keeping the guard explicit prevents the Sprint 2 author from
+    forgetting to remove the placeholder raise."""
+    from competitionops import runtime
+
+    reset_runtime_caches()
+    monkeypatch.setenv("WEB_ADAPTER", "crawl4ai")
+    with pytest.raises(RuntimeError, match="Sprint 2"):
+        runtime._web_adapter()
+
+
 def test_main_module_eager_validates_web_adapter() -> None:
     """The eager-validate function in ``main.py`` (round-3 M1) must
-    call ``_web_adapter`` alongside ``_pdf_adapter`` so a typo'd
+    CALL ``_web_adapter()`` alongside ``_pdf_adapter()`` so a typo'd
     ``WEB_ADAPTER`` crashes uvicorn import instead of the first URL
     request returning 500.
+
+    PR #30 review tightening — AST inspection rather than substring
+    grep. A commented-out call or docstring mention would slip past
+    the loose form; structural Call-node check pins the contract.
     """
-    source = inspect.getsource(main_module._eager_validate_runtime_config)
-    assert "_web_adapter" in source, (
-        "main._eager_validate_runtime_config must call _web_adapter() "
-        "to surface bad WEB_ADAPTER values at module import. Without "
-        "this the round-3 M1 contract regresses for the web ingestion "
-        "track."
+    import ast
+
+    tree = ast.parse(inspect.getsource(main_module._eager_validate_runtime_config))
+    called_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_web_adapter" in called_names, (
+        f"main._eager_validate_runtime_config must CALL ``_web_adapter()`` "
+        f"at top level. Saw calls to: {sorted(called_names)}. "
+        "A bare mention in a docstring or comment does not satisfy the "
+        "round-3 M1 contract — the function must actually invoke the "
+        "factory so unknown WEB_ADAPTER values surface at module import."
     )
+    # Symmetry — ``_pdf_adapter`` must also still be called (regression
+    # guard against someone refactoring this function and dropping a
+    # factory).
+    assert "_pdf_adapter" in called_names
 
 
 # ---------------------------------------------------------------------------

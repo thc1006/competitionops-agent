@@ -359,6 +359,28 @@ class _UrlIngestRequest(BaseModel):
     Sprint 2 wires Crawl4AI — its browser engine can be coaxed into
     reading local files via ``file://`` URLs, which would be a
     sandbox-escape vector if exposed to PM-controlled input.
+
+    **KNOWN GAP — SSRF SURFACE (Sprint 2 responsibility)**. The scheme
+    allow-list is necessary but NOT sufficient. Even with http(s)
+    enforced, PM-controlled URLs can still target internal infrastructure:
+
+    - ``http://localhost:8080/admin`` — local services on the API host
+    - ``http://10.0.0.0/8`` / ``172.16.0.0/12`` / ``192.168.0.0/16`` —
+      RFC-1918 private networks the API can reach
+    - ``http://169.254.169.254/latest/meta-data/`` — cloud instance
+      metadata endpoints (AWS / GCP / Azure all expose secrets here)
+    - ``http://[::1]/`` / ``http://[fe80::]/`` — IPv6 loopback / link-local
+
+    Sprint 0's ``MockWebAdapter`` cannot actually exfiltrate, but
+    Sprint 2's browser-backed adapter WILL follow these. **Before
+    Sprint 2 ships, this validator MUST grow IP-level filtering**:
+    resolve hostname → reject any IP in private / loopback / link-local
+    / metadata ranges. Alternatives: enforce egress through a proxy
+    that does the filtering, or run the adapter in a network namespace
+    that can only reach the public internet.
+
+    Tracked as "P1-006 Sprint 1: SSRF filtering" — must land before
+    Sprint 2's real adapter.
     """
 
     url: str

@@ -339,7 +339,19 @@ Sprint 0 surface:
   (empty in Sprint 0) so the documented install command
   ``uv sync --extra web`` is valid today; Sprint 2 fills the list.
 
-Sprint 2 scope (not yet started):
+Sprint 1 scope (SSRF filtering — must land BEFORE Sprint 2):
+
+- Extend ``_UrlIngestRequest`` validator with IP-level filtering:
+  resolve hostname → reject loopback (127.0/8, ::1/128), link-local
+  (169.254/16, fe80::/10), RFC-1918 private (10/8, 172.16/12,
+  192.168/16), and cloud metadata endpoints (169.254.169.254 special-
+  cased — AWS / GCP / Azure all expose secrets there).
+- Alternative or additional: egress proxy or network-namespace
+  isolation for the adapter container.
+- Without this, Sprint 2's browser-backed adapter is a textbook SSRF.
+- One Pydantic-layer test per blocked range + happy-path retained.
+
+Sprint 2 scope (Crawl4AI real adapter — depends on Sprint 1):
 
 - Add ``crawl4ai>=...`` to the ``[web]`` extra.
 - Implement ``Crawl4AIWebAdapter`` with lazy import (Docling pattern).
