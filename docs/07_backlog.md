@@ -339,19 +339,39 @@ Sprint 0 surface:
   (empty in Sprint 0) so the documented install command
   ``uv sync --extra web`` is valid today; Sprint 2 fills the list.
 
-Sprint 1 scope (SSRF filtering — must land BEFORE Sprint 2):
+Sprint 1: **Done (2026-05-15)** — SSRF filter landed in
+``_UrlIngestRequest`` validator. Two module-level helpers in
+``main.py`` (kept module-local since only this endpoint uses them):
 
-- Extend ``_UrlIngestRequest`` validator with IP-level filtering:
-  resolve hostname → reject loopback (127.0/8, ::1/128), link-local
-  (169.254/16, fe80::/10), RFC-1918 private (10/8, 172.16/12,
-  192.168/16), and cloud metadata endpoints (169.254.169.254 special-
-  cased — AWS / GCP / Azure all expose secrets there).
-- Alternative or additional: egress proxy or network-namespace
-  isolation for the adapter container.
-- Without this, Sprint 2's browser-backed adapter is a textbook SSRF.
-- One Pydantic-layer test per blocked range + happy-path retained.
+- ``_resolve_host_to_addresses(host)`` — IP literal path
+  (``ipaddress.ip_address``) OR DNS path (``socket.getaddrinfo``).
+  Returns ``[]`` on ``gaierror`` (lenient — unresolvable hosts can't
+  reach internal infra anyway, and this keeps RFC-6761 ``.invalid``
+  / ``.test`` URLs usable as offline test fixtures).
+- ``_is_non_routable_address(addr)`` — predicate combining
+  ``is_loopback | is_private | is_link_local | is_reserved |
+  is_multicast | is_unspecified``. Covers RFC-1918 v4 + RFC-4193 v6
+  ULA + 169.254/16 (incl. cloud metadata 169.254.169.254) +
+  IPv6 fe80::/10 + reserved + multicast + unspecified ranges.
 
-Sprint 2 scope (Crawl4AI real adapter — depends on Sprint 1):
+The validator resolves the URL's hostname and rejects (422) if ANY
+resolved address falls in the banned set. Sprint 0's scheme allow-
+list (http/https only) remains the first gate.
+
+Known limitations (Sprint 2 transport concerns, not Sprint 1):
+
+- **DNS rebinding** — a hostname resolves to a public IP at
+  validation time, then to a private IP at fetch time. Sprint 1's
+  validator only resolves once. Sprint 2 must either (a) pass the
+  resolved IP into the HTTP client, or (b) use a custom transport
+  that re-validates resolved IPs at connect time.
+- **Lenient on resolution failure** — by design; see helper docstring.
+
+Tests: 4 new in tests/test_web_ingestion.py covering 9 IP-literal
+banned ranges, DNS path resolving to private IP, DNS path resolving
+to public IP, gaierror leniency.
+
+Sprint 2 scope (Crawl4AI real adapter — now unblocked):
 
 - Add ``crawl4ai>=...`` to the ``[web]`` extra.
 - Implement ``Crawl4AIWebAdapter`` with lazy import (Docling pattern).
