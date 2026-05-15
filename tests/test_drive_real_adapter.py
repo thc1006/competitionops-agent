@@ -523,3 +523,46 @@ async def test_real_drive_http_error_audit_field_capped_at_200_chars() -> None:
 
     assert result.status == "failed"
     assert len(result.error or "") <= 200
+
+
+def test_dry_run_preview_falls_back_to_action_id_when_payload_empty() -> None:
+    """Round-4 PR A (High#1) — when the action payload carries no
+    ``folder_name`` / ``competition_name`` / ``name``, the synthetic
+    preview id previously hashed the literal ``"Untitled"`` — so two
+    distinct empty-payload Drive actions collided on the same
+    ``dry_run_<sha1("Untitled|root")>`` id. Falling back to
+    ``action.action_id`` restores the deterministic-per-action
+    property (issue-5 pattern, already in Docs / Sheets / Calendar).
+
+    Drive's real ``create_folder`` still defaults a nameless folder to
+    ``"Untitled"`` — that's a valid Drive behaviour and unchanged.
+    Only the preview HASH KEY moves to ``action_id``."""
+    adapter = GoogleDriveAdapter(settings=_real_settings())
+    action_a = ExternalAction(
+        action_id="act_alpha",
+        type="google.drive.create_competition_folder",
+        target_system="google_drive",
+        payload={},  # no folder name of any kind
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    action_b = ExternalAction(
+        action_id="act_beta",
+        type="google.drive.create_competition_folder",
+        target_system="google_drive",
+        payload={},  # same empty payload, different action
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    preview_a = adapter._dry_run_preview(action_a)
+    preview_b = adapter._dry_run_preview(action_b)
+
+    assert preview_a.external_id is not None
+    assert preview_a.external_id.startswith("dry_run_")
+    assert preview_b.external_id is not None
+    assert preview_b.external_id.startswith("dry_run_")
+    assert preview_a.external_id != preview_b.external_id, (
+        "Two empty-payload Drive preview actions with different "
+        "action_ids must produce different synthetic ids — otherwise "
+        "the approval UI de-dupes distinct actions into one."
+    )

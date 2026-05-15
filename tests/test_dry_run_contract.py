@@ -19,13 +19,13 @@ leak shape.
 Round-2 I2's framing was "extract the pattern into adapters/__init__.py
 docstring or a contract test." This file is the contract test.
 
-TODO — extend the parametrize block below when these real adapters
-land. Each must be added as ``(build_adapter, payload, action_type,
-target_system)`` so the dry-run gate is enforced before merge:
-
-- ``P1-001`` ``GoogleDocsAdapter`` (action_type ``google.docs.create_doc``)
-- ``P1-002`` ``GoogleSheetsAdapter`` (action_type ``google.sheets.append_rows``)
-- ``P1-003`` ``GoogleCalendarAdapter`` (action_type ``google.calendar.create_event``)
+Round-4 PR A (Medium#5) — the parametrize block now covers ALL FIVE
+real-mode adapters: Plane (C1), Drive (P1-005), Docs (P1-001),
+Sheets (P1-002), Calendar (P1-003). The earlier TODO listing the
+three Google adapters as "to add when they land" is closed —
+extending the block surfaced a message-format drift (Docs / Sheets /
+Calendar previously ended ``(<mode>).`` instead of the contract's
+``(<mode>, dry_run).``), which PR A also aligned.
 
 Each adapter's own ``_dry_run_preview`` docstring cross-references
 back to this file so the dependency is bidirectional.
@@ -39,7 +39,10 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from competitionops.adapters.google_calendar import GoogleCalendarAdapter
+from competitionops.adapters.google_docs import GoogleDocsAdapter
 from competitionops.adapters.google_drive import GoogleDriveAdapter
+from competitionops.adapters.google_sheets import GoogleSheetsAdapter
 from competitionops.adapters.plane import PlaneAdapter
 from competitionops.config import Settings
 from competitionops.schemas import ExternalAction, RiskLevel
@@ -59,6 +62,13 @@ def _drive_real_settings() -> Settings:
         google_oauth_access_token=SecretStr("ya29.test"),
         google_drive_api_base="https://drive-test.example.invalid",
     )
+
+
+def _google_real_settings() -> Settings:
+    """Bearer-only real-mode for Docs / Sheets / Calendar (issue-1
+    pattern — the API-base fields default to prod URLs, so a bearer
+    alone flips real mode on)."""
+    return Settings(google_oauth_access_token=SecretStr("ya29.test"))
 
 
 class _NoHTTPGuard:
@@ -100,8 +110,36 @@ class _NoHTTPGuard:
             "google.drive.create_competition_folder",
             "google_drive",
         ),
+        (
+            lambda client: GoogleDocsAdapter(
+                settings=_google_real_settings(), client=client
+            ),
+            {"title": "RunSpace Proposal"},
+            "google.docs.create_proposal_outline",
+            "google_docs",
+        ),
+        (
+            lambda client: GoogleSheetsAdapter(
+                settings=_google_real_settings(), client=client
+            ),
+            {"sheet_id": "tracker_abc", "rows": [{"name": "RunSpace"}]},
+            "google.sheets.append_tracking_row",
+            "google_sheets",
+        ),
+        (
+            lambda client: GoogleCalendarAdapter(
+                settings=_google_real_settings(), client=client
+            ),
+            {
+                "title": "Pitch rehearsal",
+                "start": "2026-09-30T15:00:00+08:00",
+                "end": "2026-09-30T16:00:00+08:00",
+            },
+            "google.calendar.create_event",
+            "google_calendar",
+        ),
     ],
-    ids=["plane", "drive"],
+    ids=["plane", "drive", "docs", "sheets", "calendar"],
 )
 async def test_real_adapter_dry_run_preview_contract(
     build_adapter: Any,

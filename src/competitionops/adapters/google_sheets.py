@@ -394,7 +394,7 @@ class GoogleSheetsAdapter:
             status="dry_run",
             external_id=synthetic_id,
             external_url=None,
-            message=f"Dry-run Sheets preview ({self._mode_label()}).",
+            message=f"Sheets preview ({self._mode_label()}, dry_run).",
         )
 
     @staticmethod

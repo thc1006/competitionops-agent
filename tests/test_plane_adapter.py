@@ -890,3 +890,50 @@ async def test_real_create_issue_truncated_search_still_dedupes_exact_match() ->
         "exact-match on full title must short-circuit before POST"
     )
     assert issue["id"] == "already-exists"
+
+
+@pytest.mark.asyncio
+async def test_real_mode_dry_run_missing_title_still_previews() -> None:
+    """Round-4 PR A (High#2) — cross-adapter consistency.
+
+    Before: real-mode + dry_run + ``plane.create_issue`` with no
+    ``title`` fell through to the KeyError path → ``status=failed``.
+    Docs / Sheets / Calendar instead produce a ``dry_run`` preview
+    with an ``action_id``-derived synthetic id (issue-5 pattern).
+
+    Plane now matches: dry_run + real_mode + recognized action type
+    ALWAYS produces a preview. The synthetic id falls back to
+    ``action.action_id`` when ``title`` is absent, so two distinct
+    titleless preview actions still get distinct ids.
+
+    The real-execution path still rejects a titleless issue with the
+    ``missing payload field: 'title'`` error — the dry_run preview is
+    a preview, not a success guarantee."""
+    adapter = PlaneAdapter(settings=_settings_real())
+    action_a = ExternalAction(
+        action_id="act_no_title_a",
+        type="plane.create_issue",
+        target_system="plane",
+        payload={},  # no title
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    action_b = ExternalAction(
+        action_id="act_no_title_b",
+        type="plane.create_issue",
+        target_system="plane",
+        payload={},  # same empty payload
+        requires_approval=True,
+        risk_level=RiskLevel.medium,
+    )
+    result_a = await adapter.execute(action_a, dry_run=True)
+    result_b = await adapter.execute(action_b, dry_run=True)
+
+    assert result_a.status == "dry_run", result_a
+    assert result_b.status == "dry_run", result_b
+    assert result_a.external_id is not None
+    assert result_a.external_id.startswith("dry_run_")
+    assert result_a.external_id != result_b.external_id, (
+        "Two titleless dry_run previews with different action_ids must "
+        "get distinct synthetic ids — action_id fallback."
+    )

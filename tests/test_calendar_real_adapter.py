@@ -455,3 +455,35 @@ async def test_real_create_event_surfaces_invalid_url_as_failed_action() -> None
     err = result.error or ""
     assert "InvalidURL" in err
     assert "SECRET-URL" not in err
+
+
+@pytest.mark.asyncio
+async def test_real_create_event_fails_loudly_when_response_missing_id() -> None:
+    """Round-4 PR A (Medium#4) — a Calendar API 200 response without an
+    ``id`` field is an upstream contract violation. Previously the
+    adapter did ``data.get("id", "")`` → surfaced ``external_id=""``
+    with ``status="executed"`` and a broken click-through URL. That
+    hides the bug exactly like the pre-issue-3 Docs ``documentId``
+    case did.
+
+    Calendar now adopts the Docs ``_MissingDocumentIdError`` pattern:
+    raise a named ``_MissingEventIdError`` inside ``_real_create_event``,
+    catch in ``execute()``, surface as ``status=failed`` with a clear
+    diagnostic. The dispatcher still promises to always return an
+    ``ExternalActionResult`` (no raise escapes ``execute``)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 200 OK but no ``id`` — contract violation.
+        return httpx.Response(200, json={"htmlLink": "https://calendar.google.com/x"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleCalendarAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(_make_event_action(), dry_run=False)
+
+    assert result.status == "failed", result
+    err = (result.error or "").lower()
+    assert "id" in err, (
+        "Failure message must name the missing field so operators can "
+        "diagnose without digging into the raw response."
+    )
+    # external_id must NOT be the empty string masquerading as a real id.
+    assert result.external_id in (None, ""), result

@@ -91,6 +91,16 @@ def _iso(value: datetime | str) -> str:
     return value.isoformat()
 
 
+class _MissingEventIdError(Exception):
+    """Raised when Calendar ``events.insert`` returns 200 without an
+    ``id`` (upstream contract violation). Caught inside ``execute()``
+    and converted into ``ExternalActionResult.failed`` with the named
+    diagnostic — round-4 PR A Medium#4, mirroring the Docs
+    ``_MissingDocumentIdError`` issue-3 pattern. Without it a missing
+    ``id`` silently produced ``external_id=""`` + a broken
+    click-through URL on a ``status="executed"`` record."""
+
+
 class GoogleCalendarAdapter:
     def __init__(
         self,
@@ -254,8 +264,19 @@ class GoogleCalendarAdapter:
             response.raise_for_status()
             data: dict[str, Any] = response.json()
 
+        # Round-4 PR A (Medium#4) — a 200 with no ``id`` is a Calendar
+        # shim contract violation. Raise a named error rather than
+        # silently emitting ``external_id=""`` + a broken UI URL on an
+        # ``executed`` audit record. ``execute()`` catches this and
+        # surfaces ``status=failed``. Mirrors Docs ``_MissingDocumentIdError``.
+        event_id = data.get("id")
+        if not event_id:
+            raise _MissingEventIdError(
+                "Calendar events.insert response missing event id"
+            )
+
         return {
-            "id": data.get("id", ""),
+            "id": event_id,
             "url": data.get("htmlLink"),
         }
 
@@ -357,6 +378,18 @@ class GoogleCalendarAdapter:
                 error=f"missing payload field: {exc}",
                 message="Calendar adapter rejected payload.",
             )
+        except _MissingEventIdError as exc:
+            # Round-4 PR A (Medium#4) — upstream contract violation:
+            # Calendar returned 200 without an event ``id``. Surface
+            # the named diagnostic; ``str(exc)`` is adapter-authored
+            # so safe to echo. Mirrors Docs ``_MissingDocumentIdError``.
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_calendar",
+                status="failed",
+                error=str(exc),
+                message="Calendar response shape violated contract.",
+            )
         except httpx.HTTPStatusError as exc:
             # M8 — never echo the raw response body. Captive portals
             # and corporate proxies often interpose HTML 4xx / 5xx
@@ -407,7 +440,7 @@ class GoogleCalendarAdapter:
             status="dry_run",
             external_id=synthetic_id,
             external_url=None,
-            message=f"Dry-run Calendar preview ({self._mode_label()}).",
+            message=f"Calendar event preview ({self._mode_label()}, dry_run).",
         )
 
     @staticmethod

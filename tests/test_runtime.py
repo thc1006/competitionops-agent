@@ -231,6 +231,27 @@ def test_eager_validate_runtime_config_succeeds_on_default_mock_adapter(
     main_module._eager_validate_runtime_config()  # must not raise
 
 
+def test_eager_validate_runtime_config_raises_on_unknown_web_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-4 PR A (High#3) — symmetric behavioural guard for
+    ``WEB_ADAPTER``. PDF already has this test; web only had an AST
+    guard that the factory is *called* — which a future
+    ``try: ... except ValueError: pass`` refactor would silently
+    defeat while still passing the AST check.
+
+    ``_eager_validate_runtime_config()`` must surface an unknown
+    ``WEB_ADAPTER`` value as a ``ValueError`` naming the offending
+    value, so a typo crashes uvicorn at module import (round-3 M1)."""
+    from competitionops import main as main_module
+
+    reset_runtime_caches()
+    monkeypatch.setenv("WEB_ADAPTER", "scrapy-2.11")
+
+    with pytest.raises(ValueError, match="scrapy-2.11"):
+        main_module._eager_validate_runtime_config()
+
+
 def test_main_module_invokes_eager_validate_runtime_config_at_init() -> None:
     """Structural guard. ``_eager_validate_runtime_config()`` must be
     called at module top level in ``main.py`` — not behind a function,

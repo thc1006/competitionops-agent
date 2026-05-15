@@ -345,6 +345,16 @@ class GoogleDriveAdapter:
         produces a stable preview id across re-runs — useful for the
         approval UI showing PMs which folder will be created.
 
+        Round-4 PR A (High#1) — when the payload carries no folder
+        name of any kind, the hash key falls back to
+        ``action.action_id`` (NOT the literal ``"Untitled"``). The
+        literal would collide every empty-payload Drive action onto a
+        single ``dry_run_<sha1("Untitled|root")>`` id. action_id
+        fallback keeps the deterministic-per-action property — the
+        issue-5 pattern shared with Docs / Sheets / Calendar. Drive's
+        real ``create_folder`` still defaults a nameless folder to
+        ``"Untitled"``; only this preview hash key changed.
+
         Cross-adapter contract — Plane's ``_dry_run_preview`` shares
         the same shape, and ``tests/test_dry_run_contract.py`` pins
         the contract (status, id prefix, None URL, message suffix).
@@ -355,7 +365,7 @@ class GoogleDriveAdapter:
             action.payload.get("folder_name")
             or action.payload.get("competition_name")
             or action.payload.get("name")
-            or "Untitled"
+            or action.action_id
         )
         parent_key = action.payload.get("parent_id") or "root"
         preview_id = f"dry_run_{_hash(f'{name}|{parent_key}')}"
