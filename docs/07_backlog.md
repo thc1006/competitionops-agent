@@ -371,14 +371,49 @@ Tests: 4 new in tests/test_web_ingestion.py covering 9 IP-literal
 banned ranges, DNS path resolving to private IP, DNS path resolving
 to public IP, gaierror leniency.
 
-Sprint 2 scope (Crawl4AI real adapter — now unblocked):
+Sprint 2: **Done (2026-05-15)** — Crawl4AI real adapter ships behind
+the ``[web]`` optional extra. ``WEB_ADAPTER=crawl4ai`` constructs
+``Crawl4AIWebAdapter`` (lazy import, same pattern as Docling). On
+first fetch the adapter imports ``crawl4ai.AsyncWebCrawler``,
+constructs a fresh crawler per request (deterministic teardown),
+calls ``arun(url=...)``, and maps the ``CrawlResult`` to our
+``WebIngestionResult``:
 
-- Add ``crawl4ai>=...`` to the ``[web]`` extra.
-- Implement ``Crawl4AIWebAdapter`` with lazy import (Docling pattern).
-- Update ``_web_adapter()`` to construct it on ``WEB_ADAPTER=crawl4ai``.
-- ``/briefs/extract/url`` returns the same shape — no API change.
-- Tests use ``httpx.MockTransport`` (or Crawl4AI's own test seam) so
-  suite stays offline.
+- ``CrawlResult.url`` (canonical post-redirect) → ``url``
+- ``CrawlResult.metadata['title']`` → ``title``
+- ``CrawlResult.markdown`` (LLM-ready cleaned content) → ``text``
+- ``CrawlResult.success=False`` → adapter raises ``RuntimeError``
+  with the upstream ``error_message`` (e.g. ``net::ERR_NAME_NOT_RESOLVED``).
+
+Missing ``[web]`` extra surfaces as ``RuntimeError`` with operator
+guidance (``uv sync --extra web``) on the FIRST fetch, not at
+module import — so operators can stage the config flip ahead of the
+extras install without breaking pod startup.
+
+**Deployment note: DNS rebinding requires infra-layer mitigation.**
+Sprint 1's Pydantic-layer SSRF filter resolves the hostname at
+validation time, but Crawl4AI's Playwright backend owns its own DNS
+stack and re-resolves at connect time. A malicious DNS server could
+return a public IP to the validator and a private IP to the browser.
+The adapter does NOT close this — operators MUST constrain egress
+at the infrastructure layer:
+
+- k8s ``NetworkPolicy`` that allows egress only to public IP ranges.
+- Egress proxy that does IP validation per connect.
+- Dedicated network namespace with restricted routing table.
+
+See ``infra/k8s/README.md`` for the recommended NetworkPolicy snippet.
+
+Tests: 4 new in ``tests/test_web_ingestion.py``, replacing the
+Sprint-0 placeholder ``test_runtime_web_adapter_factory_rejects_crawl4ai_in_sprint_0``
+per its docstring directive. Coverage:
+1. Factory constructs Crawl4AIWebAdapter when env-toggled.
+2. Missing ``crawl4ai`` package → clear RuntimeError on first fetch.
+3. CrawlResult mapping (url + title + markdown → WebIngestionResult).
+4. CrawlResult.success=False → RuntimeError with upstream message.
+
+The four tests monkeypatch ``_resolve_async_web_crawler`` so they
+run without installing the heavy ``[web]`` extra in CI.
 
 Tests: 14 new in ``tests/test_web_ingestion.py`` — port shape (2),
 mock adapter behaviour (3), runtime factory + eager-validate (4),

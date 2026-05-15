@@ -182,6 +182,77 @@ config (``PDF_ADAPTER=docling`` against a slim image) surfaces as a
 clear ``RuntimeError`` at the first PDF upload pointing at
 ``--build-arg INCLUDE_OCR=1``.
 
+## Enabling Crawl4AI (real web ingestion) — egress restriction is mandatory
+
+P1-006 Sprint 2 ships ``Crawl4AIWebAdapter`` for ``POST /briefs/extract/url``.
+Activate by setting ``WEB_ADAPTER=crawl4ai`` in the configmap AND
+including the ``[web]`` extra at install time (``uv sync --extra web``).
+Crawl4AI ships ~200MB of Playwright + Chromium; operators who don't
+need real web ingestion should leave ``WEB_ADAPTER`` unset (mock
+adapter, no install footprint).
+
+**SSRF defence requires BOTH layers:**
+
+1. **Pydantic validator** (Sprint 1, in-process) — resolves the URL's
+   hostname once and rejects on banned IP ranges (loopback / RFC-1918 /
+   link-local / IPv6 ULA / 169.254.169.254 cloud metadata / reserved /
+   multicast / unspecified). See ``main._validate_url_safety``.
+
+2. **NetworkPolicy** (this section, cluster-level) — closes the DNS
+   rebinding gap. Crawl4AI's Playwright backend re-resolves DNS at
+   connect time; a malicious authoritative server can return a public
+   IP to the validator and a private IP to the browser. The validator
+   ALONE cannot stop that.
+
+Minimum NetworkPolicy for the API pod when ``WEB_ADAPTER=crawl4ai``:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: competitionops-api-egress
+  namespace: competitionops
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: competitionops
+      app.kubernetes.io/component: api
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8         # RFC1918
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16     # link-local incl. cloud metadata
+              - 127.0.0.0/8        # loopback (cluster shouldn't route here anyway)
+              - 100.64.0.0/10      # CGNAT (k8s pod / service CIDRs often overlap)
+    # Plus DNS egress to cluster DNS so Crawl4AI's browser can resolve.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+Adjust the ``except`` list to your cluster's network plan (e.g., add
+``172.16.0.0/12`` only if it's actually internal; remove if pod CIDR
+lives there). The default above is conservative for a typical
+cloud-hosted cluster.
+
+Without this policy, the validator's resolve-once check is
+defeatable by DNS rebinding — Sprint 2's adapter has no way to
+re-validate at connect time. Treat the NetworkPolicy as part of the
+deploy contract: ``WEB_ADAPTER=crawl4ai`` without it is a security
+regression, not a configuration choice.
+
 ## Secrets
 
 ``secret.template.yaml`` ships in the repo with seven empty fields.

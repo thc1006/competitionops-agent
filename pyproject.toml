@@ -45,13 +45,14 @@ otel = [
 ocr = [
     "docling>=2.0.0"
 ]
-# P1-006 — Web ingestion (Sprint 2). Sprint 0 ships the port + mock
-# only, so this extras list is intentionally empty for now. Sprint 2
-# adds ``crawl4ai>=...`` here; operators flip WEB_ADAPTER=crawl4ai
-# and run ``uv sync --extra web`` to install the browser-backed
-# scraper. Keep the slot declared so the documented install command
-# is valid today.
-web = []
+# P1-006 — Web ingestion (Sprint 2 lands). Crawl4AI brings in
+# Playwright + Chromium browser bundle (~200MB post-install); only
+# operators flipping WEB_ADAPTER=crawl4ai pay the cost. After install
+# the operator MUST also run ``playwright install chromium`` to fetch
+# the browser binary (Crawl4AI doesn't bundle it).
+web = [
+    "crawl4ai>=0.6.0"
+]
 
 # Dev tooling follows PEP 735 dependency-groups. ``uv sync`` auto-installs
 # this group; ``uv sync --no-dev`` opts out (e.g. in production images).
