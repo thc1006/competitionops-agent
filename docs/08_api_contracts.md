@@ -25,8 +25,9 @@ Request:
 }
 ```
 
-- `source_type`: only `"text"` is supported in MVP. Drive/URL ingestion lands
-  in P1-006.
+- `source_type`: only `"text"` is supported by this endpoint. PDF goes
+  through `POST /briefs/extract/pdf` (P2-005). URL goes through
+  `POST /briefs/extract/url` (P1-006, see below).
 - `source_uri`: optional provenance pointer.
 - `content`: required, must be non-empty (`min_length=1`).
 
@@ -48,6 +49,37 @@ Response (`200 OK`):
 Errors:
 - `422 Unprocessable Entity` — missing `content`, empty `content`, or
   unsupported `source_type`.
+
+## POST /briefs/extract/url
+
+P1-006 — Sprint 0. Fetch a URL via the web ingestion port and return
+a structured `CompetitionBrief`. Sprint 0 ships with a mock adapter
+only (canned content + deterministic synthetic results); Sprint 2
+swaps in a real Crawl4AI / Playwright adapter behind `WEB_ADAPTER=crawl4ai`.
+
+Request:
+
+```json
+{
+  "url": "https://example.com/competition"
+}
+```
+
+- `url`: required. Scheme MUST be `http` or `https` (validated at
+  Pydantic layer). `file://`, `javascript:`, `data:`, `ftp:` return 422.
+- The adapter resolves the URL's canonical (post-redirect) form;
+  the response's `source_uri` reflects that canonical URL, which
+  may differ from the request `url`.
+
+Response (`200 OK`): same `CompetitionBrief` shape as
+`/briefs/extract`.
+
+Errors:
+- `422 Unprocessable Entity` — missing/empty `url`, or scheme not
+  `http(s)`.
+- `500 Internal Server Error` — adapter raises (network failure with
+  the real adapter, or `WEB_ADAPTER=crawl4ai` while still in Sprint
+  0 / without `--extra web`).
 
 ## POST /plans/generate
 

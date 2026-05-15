@@ -406,7 +406,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
-provides-extras = ["google", "langgraph", "otel", "ocr"]
+provides-extras = ["google", "langgraph", "otel", "ocr", "web"]
 
 [package.metadata.requires-dev]
 dev = [

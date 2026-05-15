@@ -1,6 +1,12 @@
 from typing import Protocol
 
-from competitionops.schemas import ActionPlan, AuditRecord, ExternalAction, ExternalActionResult
+from competitionops.schemas import (
+    ActionPlan,
+    AuditRecord,
+    ExternalAction,
+    ExternalActionResult,
+    WebIngestionResult,
+)
 
 
 class ExternalActionExecutor(Protocol):
@@ -43,3 +49,19 @@ class PdfIngestionPort(Protocol):
     """
 
     def extract(self, pdf_bytes: bytes) -> str: ...
+
+
+class WebIngestionPort(Protocol):
+    """Fetches a URL and returns plain text suitable for brief extraction.
+
+    P1-006 Sprint 0: ``MockWebAdapter`` is the only implementation.
+    Returns registered fixtures or a deterministic synthetic result per
+    URL — no network. Tests inject fixtures via ``register``.
+
+    P1-006 Sprint 2 (future): swap in a Crawl4AI / Playwright adapter
+    that renders JS-heavy competition pages. Both adapters MUST keep
+    this signature so the brief extractor never knows which engine
+    produced the text.
+    """
+
+    async def fetch(self, url: str) -> WebIngestionResult: ...

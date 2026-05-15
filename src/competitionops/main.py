@@ -3,10 +3,16 @@ import os
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from pydantic import BaseModel, field_validator
 
 from competitionops.adapters.registry import AdapterRegistry
 from competitionops.config import Settings, get_settings
-from competitionops.ports import AuditLogPort, PdfIngestionPort, PlanRepository
+from competitionops.ports import (
+    AuditLogPort,
+    PdfIngestionPort,
+    PlanRepository,
+    WebIngestionPort,
+)
 from competitionops.schemas import (
     ActionPlan,
     ApprovalDecision,
@@ -156,6 +162,7 @@ from competitionops.runtime import (  # noqa: E402
     _pdf_adapter,
     _plan_repo,
     _registry,
+    _web_adapter,
 )
 
 
@@ -178,23 +185,32 @@ def get_pdf_adapter() -> PdfIngestionPort:
     return _pdf_adapter()
 
 
+def get_web_adapter() -> WebIngestionPort:
+    """FastAPI dependency that resolves the web ingestion adapter via
+    ``runtime._web_adapter()``. Test fixtures inject stubs by
+    overriding in ``app.dependency_overrides`` — symmetric to
+    ``get_pdf_adapter``."""
+    return _web_adapter()
+
+
 def _eager_validate_runtime_config() -> None:
     """Round-3 M1 — fail fast at module import on invalid runtime
     config so the pod never reaches a state where ``/health`` is green
     but a request-path adapter would explode.
 
-    Concretely: call ``_pdf_adapter()`` once. The factory already
-    raises ``ValueError`` on unknown ``PDF_ADAPTER`` values and
-    ``ImportError`` if ``PDF_ADAPTER=docling`` is set without
-    ``--extra ocr`` installed. Surfacing both at module import means
-    uvicorn aborts before binding the port → CrashLoopBackoff with
-    the offending value in the log, instead of a silent "first PDF
-    request 503s" hours later.
+    Concretely: call ``_pdf_adapter()`` and ``_web_adapter()`` once.
+    Each factory raises ``ValueError`` on unknown values (typo'd
+    ``PDF_ADAPTER`` / ``WEB_ADAPTER``) and ``ImportError`` / ``RuntimeError``
+    when a value names a real backend whose deps aren't installed.
+    Surfacing both at module import means uvicorn aborts before
+    binding the port → CrashLoopBackoff with the offending value in
+    the log, instead of a silent "first request 503s" hours later.
 
-    Idempotent (lru_cache(1) on the factory) and side-effect-free for
-    the default ``mock`` adapter. Safe to keep at module top level.
+    Idempotent (lru_cache(1) on each factory) and side-effect-free
+    for the default ``mock`` adapters. Safe to keep at module top level.
     """
     _pdf_adapter()
+    _web_adapter()
 
 
 _eager_validate_runtime_config()
@@ -327,6 +343,87 @@ async def extract_brief_from_pdf(
     # because the regex extraction in the service is also (lightly) CPU-
     # bound and the call site shouldn't peer into the implementation.
     return await run_in_threadpool(extractor.extract_from_pdf, contents)
+
+
+# ----------------------------------------------------------------------
+# Web ingestion (P1-006)
+# ----------------------------------------------------------------------
+
+
+class _UrlIngestRequest(BaseModel):
+    """Request body for ``POST /briefs/extract/url``.
+
+    ``url`` is validated for scheme at the Pydantic layer (only
+    ``http(s)://`` accepted) so file://, javascript:, data:, ftp:
+    etc. never reach the web adapter. Defence-in-depth for when
+    Sprint 2 wires Crawl4AI — its browser engine can be coaxed into
+    reading local files via ``file://`` URLs, which would be a
+    sandbox-escape vector if exposed to PM-controlled input.
+
+    **KNOWN GAP — SSRF SURFACE (Sprint 2 responsibility)**. The scheme
+    allow-list is necessary but NOT sufficient. Even with http(s)
+    enforced, PM-controlled URLs can still target internal infrastructure:
+
+    - ``http://localhost:8080/admin`` — local services on the API host
+    - ``http://10.0.0.0/8`` / ``172.16.0.0/12`` / ``192.168.0.0/16`` —
+      RFC-1918 private networks the API can reach
+    - ``http://169.254.169.254/latest/meta-data/`` — cloud instance
+      metadata endpoints (AWS / GCP / Azure all expose secrets here)
+    - ``http://[::1]/`` / ``http://[fe80::]/`` — IPv6 loopback / link-local
+
+    Sprint 0's ``MockWebAdapter`` cannot actually exfiltrate, but
+    Sprint 2's browser-backed adapter WILL follow these. **Before
+    Sprint 2 ships, this validator MUST grow IP-level filtering**:
+    resolve hostname → reject any IP in private / loopback / link-local
+    / metadata ranges. Alternatives: enforce egress through a proxy
+    that does the filtering, or run the adapter in a network namespace
+    that can only reach the public internet.
+
+    Tracked as "P1-006 Sprint 1: SSRF filtering" — must land before
+    Sprint 2's real adapter.
+    """
+
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def _http_or_https_only(cls, v: str) -> str:
+        from urllib.parse import urlparse
+
+        if not v:
+            raise ValueError("url must not be empty")
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(
+                f"url scheme must be http or https; got {parsed.scheme!r}"
+            )
+        if not parsed.netloc:
+            raise ValueError("url must include a host component")
+        return v
+
+
+@app.post("/briefs/extract/url", response_model=CompetitionBrief)
+async def extract_brief_from_url(
+    payload: _UrlIngestRequest,
+    settings: Settings = Depends(get_settings),
+    web_port: WebIngestionPort = Depends(get_web_adapter),
+) -> CompetitionBrief:
+    """Fetch a URL via the web ingestion port and return a structured
+    ``CompetitionBrief``.
+
+    Sprint 0: the default ``MockWebAdapter`` returns canned content —
+    use ``app.dependency_overrides[get_web_adapter]`` in tests to
+    inject pre-registered fixtures. Sprint 2 swaps in a Crawl4AI /
+    Playwright-backed adapter behind ``WEB_ADAPTER=crawl4ai`` (gated
+    by the ``[web]`` extra).
+
+    The adapter's canonical URL (post-redirect) becomes the brief's
+    ``source_uri`` — may differ from the request URL when the page
+    redirects.
+    """
+    result = await web_port.fetch(payload.url)
+    extractor = BriefExtractor(settings=settings)
+    return extractor.extract_from_text(content=result.text, source_uri=result.url)
 
 
 # ----------------------------------------------------------------------

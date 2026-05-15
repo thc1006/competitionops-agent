@@ -143,6 +143,15 @@ class Settings(BaseSettings):
     # back to mock — operator typos surface at startup.
     pdf_adapter: str | None = None
 
+    # P1-006 — Web ingestion backend. ``None`` / ``"mock"`` keeps the
+    # Sprint 0 ``MockWebAdapter`` (zero deps, canned fixtures, fine
+    # for tests). ``"crawl4ai"`` will load a real Crawl4AI-backed
+    # adapter in P1-006 Sprint 2 (requires ``uv sync --extra web``).
+    # Unknown values fail loudly at the ``runtime._web_adapter``
+    # factory rather than silently falling back to mock — operator
+    # typos surface at startup via the round-3 M1 eager-validate.
+    web_adapter: str | None = None
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Round-2 M7 — validate URL fields at Settings construction so

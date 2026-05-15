@@ -50,6 +50,21 @@ class ScoringRubricItem(BaseModel):
     description: str = ""
 
 
+class WebIngestionResult(BaseModel):
+    """P1-006 — result of fetching a competition URL.
+
+    ``url`` is the **canonical** URL after redirects (may differ from
+    the request URL) and is used as ``CompetitionBrief.source_uri``.
+    ``title`` and ``text`` feed the deterministic brief extractor.
+    Real adapters (Crawl4AI / Playwright, P1-006 Sprint 2) populate
+    ``text`` with cleaned markdown; the mock returns canned strings.
+    """
+
+    url: str
+    title: str
+    text: str
+
+
 class CompetitionBrief(BaseModel):
     competition_id: str
     name: str
