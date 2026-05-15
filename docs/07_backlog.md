@@ -648,9 +648,30 @@ ML deps so default install stays light). ``runtime._pdf_adapter()``
 factory switches on ``Settings.pdf_adapter`` with deterministic
 ``ValueError`` on unknown values (prevents silent fallback on operator
 typo) and a friendlier ``RuntimeError`` pointing at the install path
-when ``docling`` is missing. Sprints 4 (GPU) and 5 (Drive path)
-deferred — they need either ``--extra ocr-gpu`` (future) or P1-005
-real Drive adapter.
+when ``docling`` is missing.
+
+Sprint 5 — Drive PDF path (2026-05-16) ✅. ``GoogleDriveAdapter``
+gains a read-only ``download_file(file_id) -> bytes`` —
+``GET /drive/v3/files/{id}?alt=media`` in real mode, registered /
+synthetic fixture bytes in mock mode. NOT an ``ExternalActionExecutor``
+action: reading a file is low-risk (CLAUDE.md rule #4's approval gate
+is move / delete / permission changes), so no dry_run / audit.
+``POST /briefs/extract/drive`` ({"file_id": ...}) downloads via the
+adapter and reuses the ``/briefs/extract/pdf`` pipeline — same
+``PDF_ADAPTER`` engine, 10 MiB cap, ``%PDF-`` magic gate —
+stamping ``source_uri = drive://<file_id>``. Drive HTTP errors map to
+404 (file not found) / 502 (other status or network); network-error
+detail is class-name-only redacted (M8/M4 discipline). 10 new tests:
+4 adapter (mock registered / mock synthetic / real ``alt=media``
+endpoint shape / real 404 → HTTPStatusError), 6 endpoint (returns
+brief + source_uri, non-PDF → 422, oversize → 413, empty file_id →
+422, Drive 404 → 404, network error → 502 redacted). Known
+limitation: the size cap runs AFTER the full in-memory download
+(operator-chosen file id, small briefs — a streaming variant is a
+follow-up if huge-file abuse matters).
+
+Sprint 4 (GPU) deferred — needs ``--extra ocr-gpu`` + GPU hardware,
+not CI-testable.
 
 **M6 (2026-05-15) closed** — ``POST /briefs/extract/pdf`` now resolves
 the adapter through ``Depends(get_pdf_adapter)`` instead of

@@ -1,11 +1,15 @@
 import ipaddress
 import os
+import re
 import socket
 
+import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel, field_validator
+
+from competitionops.adapters.google_drive import GoogleDriveAdapter
 
 from competitionops.adapters.registry import AdapterRegistry
 from competitionops.config import Settings, get_settings
@@ -193,6 +197,20 @@ def get_web_adapter() -> WebIngestionPort:
     overriding in ``app.dependency_overrides`` — symmetric to
     ``get_pdf_adapter``."""
     return _web_adapter()
+
+
+def get_drive_adapter() -> GoogleDriveAdapter:
+    """FastAPI dependency for the ``/briefs/extract/drive`` read path
+    (P2-005 Sprint 5).
+
+    Constructs a fresh ``GoogleDriveAdapter`` (reads ``get_settings()``
+    internally for the bearer-only ``real_mode`` switch). There's no
+    runtime singleton factory like ``_pdf_adapter`` / ``_web_adapter``
+    because Drive has no env-driven engine choice — mock-vs-real is
+    decided by the presence of the OAuth token, not a ``*_ADAPTER``
+    env. Tests inject a pre-seeded adapter via
+    ``app.dependency_overrides``."""
+    return GoogleDriveAdapter()
 
 
 def _eager_validate_runtime_config() -> None:
@@ -523,6 +541,120 @@ async def extract_brief_from_url(
     result = await web_port.fetch(payload.url)
     extractor = BriefExtractor(settings=settings)
     return extractor.extract_from_text(content=result.text, source_uri=result.url)
+
+
+# ----------------------------------------------------------------------
+# Drive PDF ingestion (P2-005 Sprint 5)
+# ----------------------------------------------------------------------
+
+
+# Google Drive file ids are base64url-ish — ``[A-Za-z0-9_-]``, ~33
+# chars. The endpoint interpolates ``file_id`` raw into the Drive API
+# URL path, so the charset MUST be constrained at the Pydantic layer:
+# an unconstrained id permits query-param injection (e.g.
+# ``?acknowledgeAbuse=true`` forces download of an abuse-flagged file)
+# and path traversal within googleapis.com (``../../oauth2/v3/...``
+# fired with the operator's Bearer token). The 256-char ceiling is a
+# generous upper bound — real ids are far shorter — that also caps
+# pathological inputs.
+_DRIVE_FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}")
+
+
+class _DriveIngestRequest(BaseModel):
+    """Request body for ``POST /briefs/extract/drive`` — a Google Drive
+    file id whose PDF content is pulled and run through the brief
+    extractor."""
+
+    file_id: str
+
+    @field_validator("file_id")
+    @classmethod
+    def _valid_drive_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("file_id must not be empty")
+        if not _DRIVE_FILE_ID_RE.fullmatch(v):
+            raise ValueError(
+                "file_id must be a Google Drive file id — characters "
+                "[A-Za-z0-9_-] only, max 256. Reject query / path / "
+                "fragment characters so a crafted id cannot inject "
+                "params or traverse the Drive API URL."
+            )
+        return v
+
+
+@app.post("/briefs/extract/drive", response_model=CompetitionBrief)
+async def extract_brief_from_drive(
+    payload: _DriveIngestRequest,
+    settings: Settings = Depends(get_settings),
+    pdf_port: PdfIngestionPort = Depends(get_pdf_adapter),
+    drive_adapter: GoogleDriveAdapter = Depends(get_drive_adapter),
+) -> CompetitionBrief:
+    """Pull a PDF from a Google Drive file id and return a structured
+    ``CompetitionBrief``.
+
+    Reuses the ``/briefs/extract/pdf`` pipeline — same PDF adapter
+    (``PDF_ADAPTER`` env), same 10 MiB cap, same ``%PDF-`` magic gate —
+    and stamps ``source_uri = drive://<file_id>`` for audit provenance.
+
+    Reading a Drive file is a low-risk action (CLAUDE.md rule #4's
+    approval gate covers move / delete / permission changes, not
+    reads), so this path has no dry_run machinery.
+
+    Known limitation: the size cap is enforced AFTER the full download
+    (the bytes are already in memory). The multipart endpoint streams +
+    caps mid-upload because a client controls the size; here the file
+    id is operator-chosen and a competition brief PDF is small, so a
+    post-download check is the pragmatic v1. A streaming variant is a
+    follow-up if huge-file abuse becomes a concern.
+    """
+    try:
+        pdf_bytes = await drive_adapter.download_file(file_id=payload.file_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Drive file not found: {payload.file_id!r}",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Drive returned status {exc.response.status_code} for the "
+                "file download"
+            ),
+        )
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # M8 / M4 redaction — class name only. ``str(exc)`` embeds the
+        # request URL (which carries the file id, potentially PM-pasted
+        # content); never echo it.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Drive download failed: {type(exc).__name__}",
+        )
+
+    if len(pdf_bytes) > _PDF_UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Drive file exceeds the {_PDF_UPLOAD_MAX_BYTES}-byte limit "
+                f"(downloaded {len(pdf_bytes)} bytes)."
+            ),
+        )
+    if not pdf_bytes.startswith(_PDF_MAGIC_BYTES):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Drive file does not start with the PDF magic bytes "
+                f"({_PDF_MAGIC_BYTES.decode('ascii')!r})"
+            ),
+        )
+
+    extractor = BriefExtractor(settings=settings, pdf_port=pdf_port)
+    # Round-2 H1 — offload the sync (potentially ML-heavy with Docling)
+    # extraction to a worker thread; see extract_brief_from_pdf.
+    return await run_in_threadpool(
+        extractor.extract_from_pdf, pdf_bytes, f"drive://{payload.file_id}"
+    )
 
 
 # ----------------------------------------------------------------------
