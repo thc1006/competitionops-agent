@@ -58,6 +58,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from competitionops.adapters._http_errors import (
+    HTTP_TIMEOUT_SECONDS,
     safe_error_summary,
     safe_network_summary,
 )
@@ -68,7 +69,6 @@ _DEFAULT_OFFSETS_DAYS: tuple[int, ...] = (30, 14, 7, 1)
 _DEFAULT_CALENDAR_ID = "primary"
 _CREATE_EVENT_TYPE = "google.calendar.create_event"
 _CHECKPOINT_SERIES_TYPE = "google.calendar.create_checkpoint_series"
-_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _hash(text: str, length: int = 8) -> str:
@@ -249,7 +249,7 @@ class GoogleCalendarAdapter:
                 events_url,
                 json=body,
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data: dict[str, Any] = response.json()

@@ -51,6 +51,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from competitionops.adapters._http_errors import (
+    HTTP_TIMEOUT_SECONDS,
     safe_error_summary,
     safe_network_summary,
 )
@@ -62,7 +63,6 @@ _CREATE_TYPES = frozenset(
 )
 _APPEND_TYPE = "google.docs.append_section"
 _DOCS_CREATE_PATH = "/v1/documents"
-_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _hash(text: str, length: int = 8) -> str:
@@ -177,7 +177,7 @@ class GoogleDocsAdapter:
                 create_url,
                 json={"title": title},
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data: dict[str, Any] = response.json()
@@ -221,7 +221,7 @@ class GoogleDocsAdapter:
                         batchupdate_url,
                         json={"requests": _build_section_insert_requests(sections)},
                         headers=headers,
-                        timeout=_HTTP_TIMEOUT_SECONDS,
+                        timeout=HTTP_TIMEOUT_SECONDS,
                     )
                     batch_response.raise_for_status()
                 except httpx.HTTPStatusError as exc:
@@ -283,7 +283,7 @@ class GoogleDocsAdapter:
                 batchupdate_url,
                 json={"requests": requests_payload},
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 

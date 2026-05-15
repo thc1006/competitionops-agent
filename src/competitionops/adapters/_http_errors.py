@@ -34,6 +34,14 @@ import httpx
 _SUMMARY_MAX_CHARS = 200
 _STRING_ERROR_FIELDS: tuple[str, ...] = ("error", "detail", "message")
 
+# Default per-request timeout for real-mode HTTP calls. Plane, Drive,
+# Docs, Sheets, and Calendar all duplicated this 30.0s constant before
+# the post-P1-003 polish — hoisted here so changing it in one place
+# affects every adapter consistently. Keep it as a module-level
+# constant (not an env var) so the operator-facing config surface
+# doesn't grow without intent.
+HTTP_TIMEOUT_SECONDS = 30.0
+
 
 def safe_error_summary(
     response: httpx.Response, *, target: str | None = None

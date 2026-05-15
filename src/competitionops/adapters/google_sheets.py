@@ -54,6 +54,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from competitionops.adapters._http_errors import (
+    HTTP_TIMEOUT_SECONDS,
     safe_error_summary,
     safe_network_summary,
 )
@@ -65,7 +66,6 @@ _APPEND_TYPES = frozenset(
 )
 _UPDATE_TYPE = "google.sheets.update_cells"
 _DEFAULT_RANGE = "Sheet1"
-_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _hash(text: str, length: int = 8) -> str:
@@ -172,6 +172,30 @@ class GoogleSheetsAdapter:
         rows: list[dict[str, Any]],
         sheet_range: str | None,
     ) -> dict[str, Any]:
+        """Real-mode append. Returns ``{sheet_id, row_count, url}``.
+
+        Return-shape divergence from mock — the mock additionally
+        tracks ``total_rows`` (accumulated across calls) from its
+        in-process state; real mode has no such state. ``execute()``
+        only reads ``sheet_id`` + ``url`` so the audit path is
+        mode-agnostic. PR #27 review issue 4.
+        """
+        # PR #27 review issue 1 — guard against heterogeneous row keys
+        # before serialising. ``dict.values()`` per row produces a 2D
+        # matrix that silently misaligns when rows have different key
+        # orders or different key sets: row 1's "name" can land under
+        # row 2's "deadline" column. Sheets accepts the data; the PM
+        # sees a corrupted tracker with no surface error. Fail loudly
+        # at the adapter boundary instead.
+        if rows:
+            first_keys = tuple(rows[0].keys())
+            for idx, row in enumerate(rows[1:], start=1):
+                if tuple(row.keys()) != first_keys:
+                    raise ValueError(
+                        f"heterogeneous row keys at row {idx}: rows must "
+                        "share the same key sequence (same order, same set) "
+                        "to produce a column-aligned values matrix"
+                    )
         s = self.settings
         assert s.google_oauth_access_token is not None  # for mypy
         token = s.google_oauth_access_token.get_secret_value()
@@ -191,7 +215,7 @@ class GoogleSheetsAdapter:
                 params={"valueInputOption": "USER_ENTERED"},
                 json={"values": values},
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
@@ -204,6 +228,15 @@ class GoogleSheetsAdapter:
     async def _real_update_cells(
         self, *, sheet_id: str, cell_updates: dict[str, Any]
     ) -> dict[str, Any]:
+        """Real-mode cell update. Returns ``{sheet_id, cells, url}``.
+
+        Return-shape divergence from mock — the mock's ``cells`` field
+        is the accumulated stateful map across calls (built up via
+        ``_ensure_sheet`` + ``.update``); real mode returns ONLY the
+        cells touched by this request. ``execute()`` reads only
+        ``sheet_id`` + ``url`` so audit path is mode-agnostic. PR #27
+        review issue 4 — same surface as Docs P1-001.
+        """
         s = self.settings
         assert s.google_oauth_access_token is not None  # for mypy
         token = s.google_oauth_access_token.get_secret_value()
@@ -228,7 +261,7 @@ class GoogleSheetsAdapter:
                     "data": data_entries,
                 },
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
@@ -299,6 +332,17 @@ class GoogleSheetsAdapter:
                 status="failed",
                 error=f"missing payload field: {exc}",
                 message="Sheets adapter rejected payload.",
+            )
+        except ValueError as exc:
+            # PR #27 review issue 1 — heterogeneous-row guard raises
+            # before any HTTP call. ``str(exc)`` is adapter-authored
+            # (lists row index + named constraint), safe to surface.
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_sheets",
+                status="failed",
+                error=str(exc),
+                message="Sheets adapter rejected row payload shape.",
             )
         except httpx.HTTPStatusError as exc:
             # M8 — never echo the raw response body. Captive portals

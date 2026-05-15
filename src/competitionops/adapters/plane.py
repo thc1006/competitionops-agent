@@ -68,6 +68,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from competitionops.adapters._http_errors import (
+    HTTP_TIMEOUT_SECONDS,
     safe_error_summary,
     safe_network_summary,
 )
@@ -75,7 +76,6 @@ from competitionops.config import Settings, get_settings
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
 _PLANE_API_PATH = "/api/v1/workspaces/{slug}/projects/{project_id}/issues/"
-_HTTP_TIMEOUT_SECONDS = 30.0
 # M7 — Cap the ``search`` query parameter to keep the GET URL well under
 # typical proxy / origin limits (~8 KiB) even after URL-encoding picks
 # up multi-byte unicode in competition titles. 512 chars × 4 bytes max
@@ -198,7 +198,7 @@ class PlaneAdapter:
                 list_url,
                 json={"name": title, "description_html": description_html},
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data: dict[str, Any] = response.json()
@@ -239,7 +239,7 @@ class PlaneAdapter:
                 list_url,
                 params={"search": search_value},
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
         except httpx.HTTPError:
             return None
