@@ -312,6 +312,15 @@ def test_dockerfile_default_build_does_not_install_ocr_extra() -> None:
         "so the default build is the slim image. Operators opt in via "
         "``--build-arg INCLUDE_OCR=1``."
     )
+    # Round-4 PR B — symmetric with the INCLUDE_WEB test: the extra
+    # must be GATED behind the ``:+`` substitution, not appended
+    # unconditionally. Without this assertion, a refactor that dropped
+    # the gating (plain ``--extra ocr``) would slip past — the web
+    # test caught that class of bug, the OCR test didn't.
+    assert "${INCLUDE_OCR:+--extra ocr}" in content, (
+        "The ocr extra must be gated behind ``${INCLUDE_OCR:+--extra ocr}`` "
+        "so it only installs when the build arg is non-empty."
+    )
 
 
 def test_dockerfile_exposes_include_web_build_arg() -> None:
