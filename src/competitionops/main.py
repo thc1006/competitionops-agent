@@ -299,6 +299,40 @@ _PDF_UPLOAD_CHUNK_BYTES = 1 * 1024 * 1024  # 1 MiB read step
 _PDF_MAGIC_BYTES = b"%PDF-"
 
 
+def _assert_pdf_within_cap(contents: bytes, *, source: str) -> None:
+    """Raise 413 if a fully-materialised PDF blob exceeds the size cap.
+
+    For the post-download case (Drive ingestion). The multipart upload
+    endpoint deliberately does NOT use this — it caps mid-stream while
+    reading (deep-review M5) so it never materialises an over-cap blob
+    in the first place. ``source`` is a human label for the message
+    (e.g. ``"Drive file"``)."""
+    if len(contents) > _PDF_UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,  # Content Too Large
+            detail=(
+                f"{source} exceeds the {_PDF_UPLOAD_MAX_BYTES}-byte limit "
+                f"({len(contents)} bytes)."
+            ),
+        )
+
+
+def _assert_pdf_magic(contents: bytes, *, source: str) -> None:
+    """Raise 422 if the blob does not start with the ``%PDF-`` magic.
+
+    Shared by every PDF-ingestion endpoint (multipart upload + Drive)
+    so a non-PDF never reaches the extractor. ``source`` is a human
+    label for the message (e.g. ``"uploaded file"`` / ``"Drive file"``)."""
+    if not contents.startswith(_PDF_MAGIC_BYTES):
+        raise HTTPException(
+            status_code=422,  # Unprocessable Content
+            detail=(
+                f"{source} does not start with the PDF magic bytes "
+                f"({_PDF_MAGIC_BYTES.decode('ascii')!r})"
+            ),
+        )
+
+
 @app.post("/briefs/extract/pdf", response_model=CompetitionBrief)
 async def extract_brief_from_pdf(
     file: UploadFile = File(...),
@@ -342,14 +376,9 @@ async def extract_brief_from_pdf(
         chunks.append(chunk)
     contents = b"".join(chunks)
 
-    if not contents.startswith(_PDF_MAGIC_BYTES):
-        raise HTTPException(
-            status_code=422,  # Unprocessable Content
-            detail=(
-                "uploaded file does not start with the PDF magic bytes "
-                f"({_PDF_MAGIC_BYTES.decode('ascii')!r})"
-            ),
-        )
+    # Size is already capped mid-stream above (M5); only the magic
+    # check is shared with the Drive ingestion path.
+    _assert_pdf_magic(contents, source="uploaded file")
 
     extractor = BriefExtractor(settings=settings, pdf_port=pdf_port)
     # Round-2 H1 — ``pdf_port.extract`` is sync. With ``PDF_ADAPTER=docling``
@@ -632,22 +661,11 @@ async def extract_brief_from_drive(
             detail=f"Drive download failed: {type(exc).__name__}",
         )
 
-    if len(pdf_bytes) > _PDF_UPLOAD_MAX_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"Drive file exceeds the {_PDF_UPLOAD_MAX_BYTES}-byte limit "
-                f"(downloaded {len(pdf_bytes)} bytes)."
-            ),
-        )
-    if not pdf_bytes.startswith(_PDF_MAGIC_BYTES):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Drive file does not start with the PDF magic bytes "
-                f"({_PDF_MAGIC_BYTES.decode('ascii')!r})"
-            ),
-        )
+    # Post-download cap + magic gate — shared helpers, same checks the
+    # multipart endpoint applies (it caps mid-stream, then both share
+    # the magic check).
+    _assert_pdf_within_cap(pdf_bytes, source="Drive file")
+    _assert_pdf_magic(pdf_bytes, source="Drive file")
 
     extractor = BriefExtractor(settings=settings, pdf_port=pdf_port)
     # Round-2 H1 — offload the sync (potentially ML-heavy with Docling)
