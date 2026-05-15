@@ -39,10 +39,23 @@ RUN pip install --no-cache-dir "uv>=0.11"
 #
 # The ``${INCLUDE_OCR:+--extra ocr}`` shell expansion adds the flag
 # only when ``INCLUDE_OCR`` is non-empty; default = slim image.
+#
+# Round-4 Medium#7 — ``INCLUDE_WEB`` is the symmetric build arg for
+# P1-006 Crawl4AI web ingestion. ``--build-arg INCLUDE_WEB=1`` installs
+# the ``web`` extra (Crawl4AI + Playwright Python packages). NOTE: this
+# installs the Python packages only — the Chromium browser binary is a
+# separate concern. The distroless runtime cannot host
+# ``playwright install`` (no shell, no apt), so operators provision the
+# browser at runtime via an emptyDir + ``PLAYWRIGHT_BROWSERS_PATH``
+# (infra/k8s/README.md "Enabling Crawl4AI", Option B). Without browser
+# provisioning, ``WEB_ADAPTER=crawl4ai`` fails gracefully at the first
+# fetch (caught RuntimeError), not at import.
 ARG INCLUDE_OCR=""
+ARG INCLUDE_WEB=""
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv pip install --no-cache --target /app/deps --extra otel ${INCLUDE_OCR:+--extra ocr} .
+RUN uv pip install --no-cache --target /app/deps --extra otel \
+    ${INCLUDE_OCR:+--extra ocr} ${INCLUDE_WEB:+--extra web} .
 
 # ----- Stage 2: distroless runtime -------------------------------------------
 FROM gcr.io/distroless/python3-debian12:nonroot

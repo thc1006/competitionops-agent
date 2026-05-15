@@ -10,6 +10,9 @@ from competitionops.adapters import (
     google_docs as docs_mod,
     google_drive as drive_mod,
     google_sheets as sheets_mod,
+    plane as plane_mod,
+    web_crawl4ai as web_crawl4ai_mod,
+    web_mock as web_mock_mod,
 )
 from competitionops.adapters.google_calendar import GoogleCalendarAdapter
 from competitionops.adapters.google_docs import GoogleDocsAdapter
@@ -232,17 +235,27 @@ async def test_audit_event_generated_for_every_executed_adapter_call() -> None:
 
 
 def test_no_real_google_or_network_imports_in_adapter_modules() -> None:
-    """Stage 4 + P1-005 + P1-001 + P1-002 + P1-003 guard.
+    """Stage 4 + P1-005 + P1-001 + P1-002 + P1-003 + round-4 Medium#6 guard.
 
-    All four Google adapters must avoid the real Google SDK (we keep our
-    own httpx-based adapters so domain code never imports googleapiclient).
-    Generic ``httpx`` is tolerated for ALL four adapters now that the
-    real-mode track is complete:
+    All real adapters must avoid the real Google SDK (we keep our own
+    httpx-based adapters so domain code never imports googleapiclient).
+
+    ``allow_httpx=True`` — adapters that legitimately make direct
+    httpx calls:
 
     - ``drive_mod``    — P1-005 (real folder creation)
     - ``docs_mod``     — P1-001 (real documents.create + batchUpdate)
     - ``sheets_mod``   — P1-002 (real values.append + values.batchUpdate)
     - ``calendar_mod`` — P1-003 (real events.insert + checkpoint series)
+    - ``plane_mod``    — P1-004 (real Plane REST issue creation)
+
+    ``allow_httpx=False`` — adapters that must NOT touch httpx directly:
+
+    - ``web_mock_mod``     — pure mock, no network at all
+    - ``web_crawl4ai_mod`` — Crawl4AI owns its own transport (Playwright);
+      the adapter is a thin wrapper and must not bypass it with a
+      direct httpx call (round-4 Medium#6 — previously the guard never
+      checked this module at all).
 
     Non-httpx network libs (``requests``, ``urllib``, raw sockets) and
     the Google SDKs are still banned across the board.
@@ -323,8 +336,10 @@ def test_no_real_google_or_network_imports_in_adapter_modules() -> None:
                 f"{module.__name__} must not reference {needle!r}"
             )
 
-    for module in (drive_mod, docs_mod, sheets_mod, calendar_mod):
+    for module in (drive_mod, docs_mod, sheets_mod, calendar_mod, plane_mod):
         _check(module, allow_httpx=True)
+    for module in (web_mock_mod, web_crawl4ai_mod):
+        _check(module, allow_httpx=False)
 
 
 def test_real_mode_property_does_not_reference_api_base_attribute() -> None:

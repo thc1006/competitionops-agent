@@ -312,6 +312,76 @@ def test_dockerfile_default_build_does_not_install_ocr_extra() -> None:
         "so the default build is the slim image. Operators opt in via "
         "``--build-arg INCLUDE_OCR=1``."
     )
+    # Round-4 PR B — symmetric with the INCLUDE_WEB test: the extra
+    # must be GATED behind the ``:+`` substitution, not appended
+    # unconditionally. Without this assertion, a refactor that dropped
+    # the gating (plain ``--extra ocr``) would slip past — the web
+    # test caught that class of bug, the OCR test didn't.
+    assert "${INCLUDE_OCR:+--extra ocr}" in content, (
+        "The ocr extra must be gated behind ``${INCLUDE_OCR:+--extra ocr}`` "
+        "so it only installs when the build arg is non-empty."
+    )
+
+
+def test_dockerfile_exposes_include_web_build_arg() -> None:
+    """Round-4 Medium#7 — symmetric with ``INCLUDE_OCR``. The Dockerfile
+    must accept an ``INCLUDE_WEB`` build arg so operators can build a
+    Crawl4AI-enabled image without forking the Dockerfile. Otherwise
+    ``WEB_ADAPTER=crawl4ai`` deployments hit ``RuntimeError`` (missing
+    ``crawl4ai`` package) on the first ``/briefs/extract/url`` request."""
+    content = _DOCKERFILE.read_text(encoding="utf-8")
+    assert "INCLUDE_WEB" in content, (
+        "Dockerfile must expose an INCLUDE_WEB build arg, symmetric "
+        "with INCLUDE_OCR. Operators build with "
+        "``docker build --build-arg INCLUDE_WEB=1 ...`` to include the "
+        "``web`` extra (Crawl4AI)."
+    )
+    assert "--extra web" in content, (
+        "INCLUDE_WEB is wired but the install line doesn't reference "
+        "``--extra web`` — the build arg has no effect."
+    )
+
+
+def test_dockerfile_default_build_does_not_install_web_extra() -> None:
+    """Defence against accidental default-on: the Dockerfile must treat
+    the web extra as opt-in. The default build (no build-arg) must not
+    pull in Crawl4AI / Playwright."""
+    content = _DOCKERFILE.read_text(encoding="utf-8")
+    has_default = (
+        'ARG INCLUDE_WEB=""' in content
+        or content.count("ARG INCLUDE_WEB") >= 1
+        and "INCLUDE_WEB=" in content.split("ARG INCLUDE_WEB")[1][:20]
+    )
+    assert has_default, (
+        "Dockerfile must declare ``ARG INCLUDE_WEB`` with an empty "
+        "default so the default build stays slim. Operators opt in via "
+        "``--build-arg INCLUDE_WEB=1``."
+    )
+    # The conditional substitution must gate the extra on the arg.
+    assert "${INCLUDE_WEB:+--extra web}" in content, (
+        "The web extra must be gated behind ``${INCLUDE_WEB:+--extra web}`` "
+        "so it only installs when the build arg is non-empty."
+    )
+
+
+def test_base_configmap_documents_web_adapter_as_commented_placeholder() -> None:
+    """Round-4 Medium#7 — symmetric with the ``PDF_ADAPTER`` placeholder.
+    The configmap must mention ``WEB_ADAPTER`` as a COMMENTED placeholder
+    so operators discover that ``crawl4ai`` is opt-in (requires an
+    INCLUDE_WEB image build + browser provisioning). It must stay
+    commented — activating ``crawl4ai`` by default would crash any
+    deployment whose image was built without the ``web`` extra."""
+    path = _BASE / "configmap.yaml"
+    raw = path.read_text(encoding="utf-8")
+    assert "WEB_ADAPTER" in raw, (
+        "configmap.yaml must mention WEB_ADAPTER (as a commented "
+        "placeholder) so operators discover the crawl4ai opt-in."
+    )
+    cm = _load_yaml(path)
+    assert "WEB_ADAPTER" not in cm["data"], (
+        "WEB_ADAPTER must stay COMMENTED OUT — activating crawl4ai by "
+        "default would crash any deployment built without the web extra."
+    )
 
 
 def test_readme_documents_h2_lift_configmap_step() -> None:
