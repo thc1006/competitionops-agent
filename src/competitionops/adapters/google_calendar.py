@@ -184,6 +184,14 @@ class GoogleCalendarAdapter:
                     + safe_network_summary(exc, target="calendar")
                 )
                 break
+            except _MissingEventIdError as exc:
+                # Round-4 PR A follow-up — a mid-series 200-without-id
+                # must degrade into the partial-failure surface like
+                # the httpx errors above, NOT propagate out and lose
+                # the already-created event IDs. ``str(exc)`` is
+                # adapter-authored so safe to echo.
+                partial_failure = f"checkpoint T-{offset}d failed: {exc}"
+                break
             created.append(event)
         return {
             "competition_name": competition_name,
