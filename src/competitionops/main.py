@@ -1,4 +1,6 @@
+import ipaddress
 import os
+import socket
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -350,6 +352,78 @@ async def extract_brief_from_pdf(
 # ----------------------------------------------------------------------
 
 
+_IpAddr = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+def _resolve_host_to_addresses(host: str) -> list[_IpAddr]:
+    """Return all IP addresses the host resolves to, or ``[]`` if
+    resolution fails.
+
+    Two paths:
+    - IP literal (``127.0.0.1`` / ``::1``): parsed directly via
+      ``ipaddress.ip_address`` — no DNS lookup.
+    - Hostname: ``socket.getaddrinfo`` is the canonical resolver,
+      returns IPv4 + IPv6 records. ``gaierror`` → return ``[]``
+      (lenient: unresolvable hosts can't hit internal infra anyway,
+      and this keeps RFC-6761 ``.invalid`` / ``.test`` URLs usable
+      as offline test fixtures).
+
+    Module-level so tests can monkey-patch ``socket.getaddrinfo``.
+    """
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass  # not an IP literal — fall through to DNS
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return []
+
+    addresses: list[_IpAddr] = []
+    for _family, _socktype, _proto, _canonname, sockaddr in infos:
+        # IPv4: (host, port). IPv6: (host, port, flowinfo, scope_id).
+        # Both have a str at index 0 — cast for mypy.
+        ip_str = str(sockaddr[0])
+        # Strip IPv6 zone identifier if a resolver returns one.
+        if "%" in ip_str:
+            ip_str = ip_str.split("%", 1)[0]
+        try:
+            addresses.append(ipaddress.ip_address(ip_str))
+        except ValueError:
+            continue
+    return addresses
+
+
+def _is_non_routable_address(addr: _IpAddr) -> bool:
+    """SSRF filter predicate. True if the address falls in any range
+    that should not be reachable from PM-supplied URLs:
+
+    - ``is_loopback`` — 127.0/8, ::1/128
+    - ``is_private``  — RFC-1918 v4 (10/8, 172.16/12, 192.168/16) +
+      RFC-4193 v6 ULA (fc00::/7)
+    - ``is_link_local`` — 169.254/16 (incl. cloud metadata
+      169.254.169.254 — AWS / GCP / Azure all expose secrets here)
+      + IPv6 fe80::/10
+    - ``is_reserved`` — RFC-6890 future-use / IETF protocol assignments
+    - ``is_multicast`` — 224.0.0.0/4 + ff00::/8 (not a typical SSRF
+      target but no legitimate use as a brief URL)
+    - ``is_unspecified`` — 0.0.0.0 / ``::`` (could map to all
+      interfaces on some implementations)
+
+    These categories overlap (loopback is also private on v4 etc.)
+    but together cover the SSRF target set.
+    """
+    return bool(
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
 class _UrlIngestRequest(BaseModel):
     """Request body for ``POST /briefs/extract/url``.
 
@@ -387,7 +461,7 @@ class _UrlIngestRequest(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _http_or_https_only(cls, v: str) -> str:
+    def _validate_url_safety(cls, v: str) -> str:
         from urllib.parse import urlparse
 
         if not v:
@@ -399,6 +473,31 @@ class _UrlIngestRequest(BaseModel):
             )
         if not parsed.netloc:
             raise ValueError("url must include a host component")
+
+        # P1-006 Sprint 1 — SSRF filter. The scheme allow-list above
+        # blocks file:// / javascript: / data: / ftp:, but any http(s)
+        # URL can still target internal infrastructure. Resolve the
+        # host (IP literal OR DNS) and reject if ANY resulting address
+        # falls in a non-routable range.
+        host = parsed.hostname
+        if host is None:
+            raise ValueError("url must include a host component")
+        # Strip IPv6 zone identifier (e.g. ``fe80::1%eth0``) — Python's
+        # ipaddress parser rejects zones, but link-local addresses with
+        # zones are still a banned shape.
+        if "%" in host:
+            host = host.split("%", 1)[0]
+
+        addresses = _resolve_host_to_addresses(host)
+        for addr in addresses:
+            if _is_non_routable_address(addr):
+                raise ValueError(
+                    f"url resolves to a non-routable address ({addr}); "
+                    "loopback / RFC-1918 private / link-local (incl. "
+                    "cloud-metadata 169.254.169.254) / IPv6 ULA / "
+                    "reserved / unspecified ranges are blocked to "
+                    "prevent SSRF"
+                )
         return v
 
 

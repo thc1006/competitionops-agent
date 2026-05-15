@@ -256,6 +256,117 @@ def test_post_briefs_extract_url_rejects_non_http_scheme() -> None:
         assert response.status_code == 422, f"{bad_url}: {response.text}"
 
 
+def test_post_briefs_extract_url_rejects_ip_literal_in_banned_ranges() -> None:
+    """P1-006 Sprint 1 — SSRF filter. IP-literal URLs targeting
+    loopback / RFC-1918 private / link-local (incl. cloud metadata
+    169.254.169.254) / IPv6 loopback + link-local + ULA / unspecified
+    must 422 BEFORE the adapter dispatch.
+
+    Each entry is an IP literal — no DNS lookup involved. The filter
+    parses with ``ipaddress.ip_address`` and rejects on
+    ``is_private | is_loopback | is_link_local | is_reserved |
+    is_multicast | is_unspecified``.
+    """
+    reset_runtime_caches()
+    client = TestClient(main_module.app)
+    banned = [
+        # IPv4
+        ("http://127.0.0.1/x", "loopback"),
+        ("http://10.0.0.1/x", "RFC1918 10/8"),
+        ("http://172.16.0.1/x", "RFC1918 172.16/12"),
+        ("http://192.168.1.1/x", "RFC1918 192.168/16"),
+        ("http://169.254.169.254/latest/meta-data/", "cloud metadata"),
+        ("http://0.0.0.0/x", "unspecified"),
+        # IPv6
+        ("http://[::1]/x", "v6 loopback"),
+        ("http://[fe80::1]/x", "v6 link-local"),
+        ("http://[fc00::1]/x", "v6 ULA"),
+    ]
+    for url, label in banned:
+        response = client.post("/briefs/extract/url", json={"url": url})
+        assert response.status_code == 422, (
+            f"{label} ({url}) should be rejected — got {response.status_code}: "
+            f"{response.text}"
+        )
+
+
+def test_post_briefs_extract_url_rejects_hostname_resolving_to_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSRF filter handles the DNS-resolution path: a public-looking
+    hostname that resolves to a private IP must be rejected. Tests
+    monkey-patch ``socket.getaddrinfo`` to avoid real DNS in CI."""
+    import socket
+
+    def fake_getaddrinfo(host: str, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        # Return an A record pointing at RFC-1918.
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.20.30.40", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    reset_runtime_caches()
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/briefs/extract/url",
+        json={"url": "https://attacker-controlled.example.com/page"},
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert "ssrf" in response.text.lower() or "private" in response.text.lower() or (
+        "non-routable" in response.text.lower()
+    ), body
+
+
+def test_post_briefs_extract_url_accepts_hostname_resolving_to_public_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DNS path's happy case — a hostname that resolves to a
+    public IP must pass through. Mock adapter handles the actual
+    fetch so no real network access."""
+    import socket
+
+    def fake_getaddrinfo(host: str, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        # 93.184.216.34 is example.com's historical public IP. Any
+        # non-banned address works for the test.
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    reset_runtime_caches()
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/briefs/extract/url",
+        json={"url": "https://example.com/competition"},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_post_briefs_extract_url_lenient_on_dns_resolution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``getaddrinfo`` raises ``gaierror`` (hostname doesn't resolve),
+    the filter is lenient — accept the URL and let the adapter handle
+    the network error. Rationale: unresolvable hostnames can't reach
+    internal infrastructure either, so the SSRF threat doesn't apply.
+    This keeps ``.invalid`` / ``.test`` URLs (RFC 6761) usable as
+    offline test fixtures.
+
+    Existing tests use ``https://example.invalid/...`` and rely on
+    this leniency."""
+    import socket
+
+    def fake_getaddrinfo(host: str, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise socket.gaierror("Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    reset_runtime_caches()
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/briefs/extract/url",
+        json={"url": "https://does-not-resolve.invalid/comp"},
+    )
+    # Filter accepts; adapter (mock) handles synthetic content.
+    assert response.status_code == 200, response.text
+
+
 def test_post_briefs_extract_url_uses_fixture_when_registered() -> None:
     """Dependency override to inject a pre-registered adapter — exercises
     the full pipeline (adapter → BriefExtractor → response) with known
