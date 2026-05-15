@@ -302,6 +302,57 @@ remain pure mocks until P1-001~003).
 
 ### P1-006 — Web ingestion through Playwright / Crawl4AI
 
+Status: **Sprint 0 done (2026-05-15)** — scaffolding only. Port +
+mock + Settings + runtime factory + ``POST /briefs/extract/url``
+endpoint shipped; real adapter (Crawl4AI / Playwright direct) lands
+in Sprint 2.
+
+Sprint 0 surface:
+
+- ``WebIngestionPort`` (``competitionops.ports``) — async
+  ``fetch(url) -> WebIngestionResult``. ``WebIngestionResult`` is a
+  Pydantic model carrying ``url`` (canonical post-redirect),
+  ``title``, ``text``. Mirror of the P2-005 ``PdfIngestionPort``
+  shape.
+- ``MockWebAdapter`` (``competitionops.adapters.web_mock``) — two
+  modes: registered fixtures via ``adapter.register(result)`` for
+  integration tests; otherwise deterministic synthetic content keyed
+  on the URL. No network. Records every fetch in ``.calls``.
+- ``Settings.web_adapter: str | None`` — ``None`` / ``"mock"`` →
+  mock; ``"crawl4ai"`` reserved for Sprint 2 (currently raises
+  ``RuntimeError`` with operator guidance); unknown values raise
+  ``ValueError`` via round-3 M1 eager-validate at ``main.py`` module
+  init.
+- ``runtime._web_adapter()`` — ``@lru_cache(1)`` factory symmetric
+  to ``_pdf_adapter()``. Conftest autouse teardown clears the cache.
+- ``main.get_web_adapter()`` — FastAPI dependency.
+  ``main._eager_validate_runtime_config()`` calls ``_web_adapter()``
+  alongside ``_pdf_adapter()`` so typo'd ``WEB_ADAPTER`` crashes
+  uvicorn import (round-3 M1).
+- ``POST /briefs/extract/url`` — body ``{"url": "https://..."}``,
+  returns ``CompetitionBrief``. URL is validated for scheme at the
+  Pydantic layer: only ``http(s)://`` accepted. ``file://``,
+  ``javascript:``, ``data:``, ``ftp:`` etc. surface as 422 BEFORE
+  the adapter is called — defence-in-depth for when Sprint 2 wires
+  a browser engine that could read local files via ``file://``.
+- ``pyproject.toml`` declares ``[project.optional-dependencies].web``
+  (empty in Sprint 0) so the documented install command
+  ``uv sync --extra web`` is valid today; Sprint 2 fills the list.
+
+Sprint 2 scope (not yet started):
+
+- Add ``crawl4ai>=...`` to the ``[web]`` extra.
+- Implement ``Crawl4AIWebAdapter`` with lazy import (Docling pattern).
+- Update ``_web_adapter()`` to construct it on ``WEB_ADAPTER=crawl4ai``.
+- ``/briefs/extract/url`` returns the same shape — no API change.
+- Tests use ``httpx.MockTransport`` (or Crawl4AI's own test seam) so
+  suite stays offline.
+
+Tests: 14 new in ``tests/test_web_ingestion.py`` — port shape (2),
+mock adapter behaviour (3), runtime factory + eager-validate (4),
+endpoint plumbing including scheme validation (4), pyproject extras
+declaration (1). All offline.
+
 ## P2
 
 ### P2-001 — LangGraph workflow with human-in-the-loop

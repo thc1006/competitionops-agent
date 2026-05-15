@@ -45,6 +45,13 @@ otel = [
 ocr = [
     "docling>=2.0.0"
 ]
+# P1-006 — Web ingestion (Sprint 2). Sprint 0 ships the port + mock
+# only, so this extras list is intentionally empty for now. Sprint 2
+# adds ``crawl4ai>=...`` here; operators flip WEB_ADAPTER=crawl4ai
+# and run ``uv sync --extra web`` to install the browser-backed
+# scraper. Keep the slot declared so the documented install command
+# is valid today.
+web = []
 
 # Dev tooling follows PEP 735 dependency-groups. ``uv sync`` auto-installs
 # this group; ``uv sync --no-dev`` opts out (e.g. in production images).

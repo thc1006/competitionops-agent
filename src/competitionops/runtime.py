@@ -39,9 +39,15 @@ from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
 from competitionops.config import get_settings
-from competitionops.ports import AuditLogPort, PdfIngestionPort, PlanRepository
+from competitionops.ports import (
+    AuditLogPort,
+    PdfIngestionPort,
+    PlanRepository,
+    WebIngestionPort,
+)
 
 _KNOWN_PDF_ADAPTERS: tuple[str, ...] = ("mock", "docling")
+_KNOWN_WEB_ADAPTERS: tuple[str, ...] = ("mock", "crawl4ai")
 
 
 @lru_cache(maxsize=1)
@@ -142,4 +148,40 @@ def _pdf_adapter() -> PdfIngestionPort:
         f"Unknown pdf_adapter / PDF_ADAPTER value: {raw!r} "
         f"(normalized to {choice!r}). Expected one of "
         f"{_KNOWN_PDF_ADAPTERS!r} (case-insensitive)."
+    )
+
+
+@lru_cache(maxsize=1)
+def _web_adapter() -> WebIngestionPort:
+    """Web ingestion adapter singleton (P1-006).
+
+    Switches on ``Settings.web_adapter`` (env ``WEB_ADAPTER``):
+
+    - ``None`` / ``"mock"`` (default): Sprint 0's ``MockWebAdapter`` —
+      returns registered fixtures or deterministic synthetic content.
+      No network. Fine for tests + CI + dry-run previews.
+    - ``"crawl4ai"`` (Sprint 2, not yet implemented): real Crawl4AI-
+      backed browser scraping. Requires ``uv sync --extra web``.
+      Currently raises ``RuntimeError`` pointing at the Sprint 2
+      backlog item so operators don't ship a half-real config.
+
+    Unknown values raise ``ValueError`` — mirrors the round-3 M1
+    pattern for PDF_ADAPTER. Wired through ``main.get_web_adapter``.
+    """
+    from competitionops.adapters.web_mock import MockWebAdapter
+
+    raw = get_settings().web_adapter or "mock"
+    choice = raw.lower()
+    if choice == "mock":
+        return MockWebAdapter()
+    if choice == "crawl4ai":
+        raise RuntimeError(
+            "WEB_ADAPTER=crawl4ai is reserved for P1-006 Sprint 2 — "
+            "the real Crawl4AI-backed adapter has not landed yet. "
+            "Unset WEB_ADAPTER (or set to ``mock``) until Sprint 2 ships."
+        )
+    raise ValueError(
+        f"Unknown web_adapter / WEB_ADAPTER value: {raw!r} "
+        f"(normalized to {choice!r}). Expected one of "
+        f"{_KNOWN_WEB_ADAPTERS!r} (case-insensitive)."
     )
