@@ -36,6 +36,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from competitionops.adapters._http_errors import (
+    HTTP_TIMEOUT_SECONDS,
     safe_error_summary,
     safe_network_summary,
 )
@@ -47,7 +48,6 @@ _FOLDER_TYPES = frozenset(
 )
 _FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 _DRIVE_FILES_PATH = "/drive/v3/files"
-_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _hash(text: str, length: int = 8) -> str:
@@ -140,7 +140,7 @@ class GoogleDriveAdapter:
                 list_url,
                 json=body,
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
             data: dict[str, Any] = response.json()
@@ -173,7 +173,7 @@ class GoogleDriveAdapter:
                 list_url,
                 params={"q": query, "fields": "files(id,name,mimeType,parents)"},
                 headers=headers,
-                timeout=_HTTP_TIMEOUT_SECONDS,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
         except httpx.HTTPError:
             return None

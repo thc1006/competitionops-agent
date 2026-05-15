@@ -207,6 +207,48 @@ async def test_real_append_rows_serialises_dict_rows_to_2d_values_array() -> Non
 
 
 @pytest.mark.asyncio
+async def test_real_append_rows_rejects_heterogeneous_row_keys() -> None:
+    """PR #27 review follow-up — ``dict.values()`` serialisation is
+    silently lossy when rows have different key orders or different
+    key sets. Row 1's ``a`` would land under row 2's ``b`` column,
+    corrupting the sheet with no surface error.
+
+    The adapter MUST reject heterogeneous-key rows before posting,
+    raising a clear ``ValueError`` so the caller (planner) sees the
+    contract violation. ``execute()`` catches it as a failed action
+    with the diagnostic in the error field.
+    """
+    seen_methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_methods.append(request.method)
+        return httpx.Response(200, json={"spreadsheetId": "x"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleSheetsAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(
+            _make_append_action(
+                rows=[
+                    {"name": "RunSpace", "deadline": "2026-09-30"},
+                    {"deadline": "2026-10-15", "name": "DemoCup"},  # reversed order
+                ],
+            ),
+            dry_run=False,
+        )
+
+    assert seen_methods == [], (
+        "Heterogeneous-row payload reached the network — the guard "
+        "must reject BEFORE posting to avoid silent column "
+        "misalignment in the sheet."
+    )
+    assert result.status == "failed"
+    err = (result.error or "").lower()
+    assert "key" in err or "column" in err or "order" in err, (
+        f"error must name the heterogeneous-key shape: {result.error!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_real_append_rows_respects_explicit_range() -> None:
     """When the payload supplies ``range``, the adapter uses it verbatim
     (e.g., ``Tracker!A:Z``). Don't override or sanitise — the operator
