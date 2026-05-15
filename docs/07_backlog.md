@@ -588,8 +588,24 @@ Sprint 6 — opt-in OTLP / console exporter wiring driven by env
 no extra needed). Default behavior unchanged — exporters stay off unless
 explicitly opted in. ✅
 
-P2-004 main track complete. Remaining: optional polish (Sprint 6+
-metric attribute review, custom resource attributes for service.name).
+Sprint 6+ — OTel ``Resource`` attributes (2026-05-16) ✅. Before this,
+``TracerProvider()`` / ``MeterProvider()`` were constructed with no
+``resource=``, so the SDK default ``service.name`` was
+``unknown_service:python`` — every exported trace + metric landed
+unattributed in Jaeger / Grafana / Tempo, undermining the whole
+P2-004 investment. ``telemetry/setup.py`` gains ``_build_resource()``
+which composes ``service.name`` (``OTEL_SERVICE_NAME`` env, else
+``competitionops-api``) + ``service.version`` (installed package
+version via ``importlib.metadata``). ``deployment.environment`` and
+arbitrary operator attributes flow in through the OTel-standard
+``OTEL_RESOURCE_ATTRIBUTES`` env, which ``Resource.create`` merges
+automatically — no custom env var invented. Both
+``setup_tracer_provider`` and ``setup_meter_provider`` now pass the
+resource into their provider constructors. 6 new tests in
+``tests/test_otel_resource.py``.
+
+P2-004 main track complete. Remaining: optional polish (metric
+attribute naming review — non-blocking).
 
 **M1 + M2 (2026-05-15) closed** — Two install-order footguns in the
 OTel bootstrap surfaced for the first time. M1: when a MeterProvider

@@ -25,12 +25,56 @@ provider unchanged.
 
 from __future__ import annotations
 
+import importlib.metadata
+import os
 from typing import Sequence
 
 from opentelemetry import metrics, trace
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import MetricReader
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
+
+# P2-004 Sprint 6+ — resource attributes. Without a Resource the SDK
+# default ``service.name`` is ``unknown_service:python``, leaving every
+# exported trace + metric unattributed in the observability backend.
+_DEFAULT_SERVICE_NAME = "competitionops-api"
+_PACKAGE_NAME = "competitionops-agent"
+
+
+def _package_version() -> str:
+    """Installed package version, for the ``service.version`` resource
+    attribute. Falls back to a sentinel when the package isn't
+    installed as a distribution (e.g. a bare source checkout)."""
+    try:
+        return importlib.metadata.version(_PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:  # pragma: no cover
+        return "0.0.0+unknown"
+
+
+def _build_resource() -> Resource:
+    """Build the OTel ``Resource`` shared by the tracer + meter providers.
+
+    Attributes:
+    - ``service.name`` — ``OTEL_SERVICE_NAME`` env if set (resolved
+      here so the operator's choice wins; ``Resource.create`` would
+      otherwise let our explicit dict override the env), else the
+      project default.
+    - ``service.version`` — the installed package version.
+
+    ``deployment.environment`` and any other operator attributes are
+    NOT set here — operators supply them through the OTel-standard
+    ``OTEL_RESOURCE_ATTRIBUTES`` env, which ``Resource.create`` merges
+    automatically. Inventing a custom env var would fragment the
+    config surface for no gain.
+    """
+    return Resource.create(
+        {
+            "service.name": os.environ.get("OTEL_SERVICE_NAME")
+            or _DEFAULT_SERVICE_NAME,
+            "service.version": _package_version(),
+        }
+    )
 
 
 class OtelInstallOrderError(RuntimeError):
@@ -59,7 +103,7 @@ def setup_tracer_provider() -> TracerProvider:
     current = trace.get_tracer_provider()
     if isinstance(current, TracerProvider):
         return current
-    provider = TracerProvider()
+    provider = TracerProvider(resource=_build_resource())
     trace.set_tracer_provider(provider)
     return provider
 
@@ -94,6 +138,8 @@ def setup_meter_provider(
                 "``readers=`` to no-op accept the existing provider."
             )
         return current
-    provider = MeterProvider(metric_readers=requested)
+    provider = MeterProvider(
+        resource=_build_resource(), metric_readers=requested
+    )
     metrics.set_meter_provider(provider)
     return provider
