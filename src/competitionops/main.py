@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import re
 import socket
 
 import httpx
@@ -547,6 +548,18 @@ async def extract_brief_from_url(
 # ----------------------------------------------------------------------
 
 
+# Google Drive file ids are base64url-ish — ``[A-Za-z0-9_-]``, ~33
+# chars. The endpoint interpolates ``file_id`` raw into the Drive API
+# URL path, so the charset MUST be constrained at the Pydantic layer:
+# an unconstrained id permits query-param injection (e.g.
+# ``?acknowledgeAbuse=true`` forces download of an abuse-flagged file)
+# and path traversal within googleapis.com (``../../oauth2/v3/...``
+# fired with the operator's Bearer token). The 256-char ceiling is a
+# generous upper bound — real ids are far shorter — that also caps
+# pathological inputs.
+_DRIVE_FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}")
+
+
 class _DriveIngestRequest(BaseModel):
     """Request body for ``POST /briefs/extract/drive`` — a Google Drive
     file id whose PDF content is pulled and run through the brief
@@ -556,9 +569,17 @@ class _DriveIngestRequest(BaseModel):
 
     @field_validator("file_id")
     @classmethod
-    def _non_empty(cls, v: str) -> str:
-        if not v or not v.strip():
+    def _valid_drive_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
             raise ValueError("file_id must not be empty")
+        if not _DRIVE_FILE_ID_RE.fullmatch(v):
+            raise ValueError(
+                "file_id must be a Google Drive file id — characters "
+                "[A-Za-z0-9_-] only, max 256. Reject query / path / "
+                "fragment characters so a crafted id cannot inject "
+                "params or traverse the Drive API URL."
+            )
         return v
 
 

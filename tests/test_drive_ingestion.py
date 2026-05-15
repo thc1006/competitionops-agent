@@ -168,3 +168,81 @@ def test_post_briefs_extract_drive_redacts_network_error() -> None:
         assert "SECRET-FILE-ID" not in detail
     finally:
         app.dependency_overrides.pop(get_drive_adapter, None)
+
+
+def test_post_briefs_extract_drive_rejects_malformed_file_id() -> None:
+    """Deep-review Medium — ``file_id`` is interpolated raw into the
+    Drive API URL path. Without charset validation, a crafted id
+    injects query params (e.g. ``?acknowledgeAbuse=true`` forces
+    download of an abuse-flagged file) or path-traverses within
+    googleapis.com (``../../oauth2/v3/userinfo``). The Pydantic
+    validator must reject anything outside the Drive id charset
+    ``[A-Za-z0-9_-]`` with a 422, before the adapter builds the URL."""
+    reset_runtime_caches()
+    client = TestClient(main_module.app)
+    malformed = [
+        "realid?acknowledgeAbuse=true",  # query-param injection
+        "realid&supportsAllDrives=true",  # param injection
+        "../../oauth2/v3/userinfo",       # path traversal
+        "realid#fragment",               # fragment injection
+        "folder/realid",                 # slash — extra path segment
+        "realid with spaces",            # space
+    ]
+    for bad_id in malformed:
+        response = client.post(
+            "/briefs/extract/drive", json={"file_id": bad_id}
+        )
+        assert response.status_code == 422, f"{bad_id!r}: {response.text}"
+
+
+def test_post_briefs_extract_drive_accepts_well_formed_file_id() -> None:
+    """The charset validator must NOT reject legitimate Drive ids —
+    they are ``[A-Za-z0-9_-]`` (base64url-ish, ~33 chars). Pin a
+    realistic id so the regex isn't accidentally too strict."""
+    from competitionops.main import app, get_drive_adapter
+
+    real_id = "1AbCd_Ef-GhIjKlMnOpQrStUvWxYz0123"
+    adapter = GoogleDriveAdapter(settings=Settings())
+    adapter.register_file_content(real_id, b"%PDF-RunSpace 2026 brief.")
+    app.dependency_overrides[get_drive_adapter] = lambda: adapter
+    try:
+        reset_runtime_caches()
+        client = TestClient(app)
+        response = client.post(
+            "/briefs/extract/drive", json={"file_id": real_id}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["source_uri"] == f"drive://{real_id}"
+    finally:
+        app.dependency_overrides.pop(get_drive_adapter, None)
+
+
+def test_post_briefs_extract_drive_maps_drive_403() -> None:
+    """A non-404 Drive error status (e.g. 403 — the OAuth token lacks
+    the Drive scope) maps to 502, not a 500 or a leaked body."""
+    from competitionops.main import app, get_drive_adapter
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "insufficient scope"})
+
+    def _real_adapter() -> GoogleDriveAdapter:
+        settings = Settings(
+            google_oauth_access_token=SecretStr("ya29.test"),
+            google_drive_api_base="https://drive-test.example.invalid",
+        )
+        return GoogleDriveAdapter(settings=settings, client=_mock_transport(handler))
+
+    app.dependency_overrides[get_drive_adapter] = _real_adapter
+    try:
+        reset_runtime_caches()
+        client = TestClient(app)
+        response = client.post(
+            "/briefs/extract/drive", json={"file_id": "scopeless"}
+        )
+        assert response.status_code == 502, response.text
+        detail = response.json().get("detail", "")
+        assert "403" in detail
+        # The Drive error body must not leak through.
+        assert "insufficient scope" not in detail
+    finally:
+        app.dependency_overrides.pop(get_drive_adapter, None)

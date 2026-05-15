@@ -99,7 +99,10 @@ Request:
 }
 ```
 
-- `file_id`: required, non-empty / non-whitespace.
+- `file_id`: required. Must match the Google Drive file-id charset
+  `[A-Za-z0-9_-]` (max 256 chars) — query / path / fragment characters
+  are rejected so a crafted id cannot inject params or traverse the
+  Drive API URL.
 - Real Drive access activates when `Settings.google_oauth_access_token`
   is set; otherwise the mock adapter returns canned bytes.
 
@@ -107,8 +110,9 @@ Response (`200 OK`): same `CompetitionBrief` shape as
 `/briefs/extract`, with `source_uri = "drive://<file_id>"`.
 
 Errors:
-- `422 Unprocessable Entity` — missing/empty `file_id`, or the
-  downloaded file does not start with the `%PDF-` magic bytes.
+- `422 Unprocessable Entity` — missing/empty `file_id`, `file_id`
+  outside the `[A-Za-z0-9_-]` charset, or the downloaded file does not
+  start with the `%PDF-` magic bytes.
 - `413 Content Too Large` — the Drive file exceeds the 10 MiB cap.
 - `404 Not Found` — Drive has no file with that id.
 - `502 Bad Gateway` — Drive returned a non-404 error status, or a
