@@ -178,11 +178,72 @@ redaction (3). All offline via ``httpx.MockTransport``.
 
 ### P1-003 — Google Calendar real adapter
 
-Same ``real_mode`` pattern as P1-002 above — bearer-only gate.
-Calendar's API base will live alongside Drive / Docs / Sheets bases
-in Settings with a prod-URL default and the standard URL validator,
-so the dead-clause trap applies identically. Extend the AST guard
-tuple when Calendar lands.
+Status: **Done (2026-05-15)** — Calendar adapter upgraded from
+Sprint-0 stateful mock to mock-first + real-mode httpx-backed REST.
+Bearer-only ``real_mode`` (issue-1 pattern); ``google_calendar_api_base``
+defaults to ``https://www.googleapis.com`` (Calendar v3 lives under
+``/calendar/v3/...`` on the unified Google APIs host). AST guard tuple
+extended to cover calendar_mod alongside drive / docs / sheets — the
+real-mode track now spans all four Google adapters.
+
+Real-mode operations:
+- ``google.calendar.create_event`` →
+  ``POST /calendar/v3/calendars/{calendarId}/events``. Default
+  calendarId ``"primary"`` (auth'd user's primary calendar); payload
+  may override via ``calendar_id``. Body shape: ``{"summary": ...,
+  "start": {"dateTime": ISO}, "end": {"dateTime": ISO}, "attendees":
+  [{"email": ...}]}``. Email strings auto-wrapped into the Calendar
+  API's expected object shape. The returned ``htmlLink`` is surfaced
+  as ``external_url`` for click-through from the audit log.
+- ``google.calendar.create_checkpoint_series`` → N create_event calls,
+  one per offset (default ``(30, 14, 7, 1)`` days before deadline).
+  **Partial-failure surface (issue-2 pattern from Docs)**: if some
+  checkpoints succeed before one fails, the IDs of the created events
+  are preserved in the dispatcher's error message so the operator
+  can clean up. ``status=failed``, ``external_id=series_<hash>``,
+  ``external_url`` points at the first created event.
+
+Safety properties follow Plane / Drive / Docs / Sheets:
+- Deep-review C1 — dry_run short-circuits BEFORE any HTTP call,
+  returns ``dry_run_<sha1(title-or-competition_name)[:8]>``.
+  Fallback to action_id when neither is present (issue-5 pattern).
+- M8 + round-3 M4 — HTTPStatusError → ``safe_error_summary``;
+  HTTPError + InvalidURL → ``safe_network_summary``. Event titles,
+  attendee emails, calendarIds all carry user content.
+- Stage-4 httpx guard now allows httpx in calendar_mod — the
+  real-mode track is complete; all four Google adapters are
+  exempted. Non-httpx libs (``requests``, ``urllib``, raw sockets)
+  + Google SDKs remain banned across the board.
+
+Return-shape divergence between mock and real (issue-4 pattern):
+mock ``_mock_create_event`` returns the full stateful record
+(``title``, ``start``, ``end``, ``attendees``, ``url``); real
+``_real_create_event`` returns only ``{id, url}``. Dispatcher reads
+only ``id`` + ``url`` so audit path is mode-agnostic; direct
+callers of ``adapter.create_event(...)`` inspecting ``["attendees"]``
+work on mock and ``KeyError`` on real. Docstring on the real method
+flags this.
+
+Out of scope (deferred follow-ups):
+- RRULE / recurrence — single events only.
+- Conference data (Meet / Hangouts link autocreation).
+- Reminder overrides — uses calendar defaults.
+- Timezone normalisation — caller-supplied ISO strings must carry
+  tzinfo. Naive datetimes pass through; Calendar uses the
+  calendar's primary timezone.
+- OAuth refresh — operator-side via the access token field.
+- 429 backoff / retry.
+
+Tests: 15 new in ``tests/test_calendar_real_adapter.py`` — real_mode
+toggle (3), create_event endpoint + body + calendar_id + attendees +
+htmlLink (4), checkpoint series + partial-failure + explicit offsets
+(3), dry_run safety on both (2), 401 + network + InvalidURL
+redaction (3). All offline via ``httpx.MockTransport``.
+
+``create_checkpoint_series`` return shape changed from flat list of
+events to ``{"events": [...], "partial_failure": str | None}`` —
+needed to surface partial-failure without losing the created IDs.
+Updated mock-mode test in ``test_google_workspace_adapters.py``.
 
 ### P1-004 — Plane REST adapter
 
