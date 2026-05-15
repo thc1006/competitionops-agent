@@ -37,6 +37,17 @@ data:
   #
   # PDF_ADAPTER: docling
 
+  # P1-006 Sprint 2 — switch the web ingestion engine. Default (unset /
+  # empty) keeps the canned MockWebAdapter; ``crawl4ai`` switches to
+  # the real Crawl4AI browser scraper. REQUIRES the image to have been
+  # built with the web extra:
+  #   docker build --build-arg INCLUDE_WEB=1 -f infra/docker/Dockerfile .
+  # AND a runtime browser cache (emptyDir + PLAYWRIGHT_BROWSERS_PATH) —
+  # see infra/k8s/README.md "Enabling Crawl4AI". Without both, the
+  # adapter fails at the first /briefs/extract/url request.
+  #
+  # WEB_ADAPTER: crawl4ai
+
   # OTel — overlays set OTEL_EXPORTER_OTLP_ENDPOINT to the cluster's
   # collector. Without it, Sprint 6 wiring stays silent (Proxy
   # MeterProvider, no exporter attached).
