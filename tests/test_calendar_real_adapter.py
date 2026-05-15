@@ -455,3 +455,82 @@ async def test_real_create_event_surfaces_invalid_url_as_failed_action() -> None
     err = result.error or ""
     assert "InvalidURL" in err
     assert "SECRET-URL" not in err
+
+
+@pytest.mark.asyncio
+async def test_real_create_event_fails_loudly_when_response_missing_id() -> None:
+    """Round-4 PR A (Medium#4) — a Calendar API 200 response without an
+    ``id`` field is an upstream contract violation. Previously the
+    adapter did ``data.get("id", "")`` → surfaced ``external_id=""``
+    with ``status="executed"`` and a broken click-through URL. That
+    hides the bug exactly like the pre-issue-3 Docs ``documentId``
+    case did.
+
+    Calendar now adopts the Docs ``_MissingDocumentIdError`` pattern:
+    raise a named ``_MissingEventIdError`` inside ``_real_create_event``,
+    catch in ``execute()``, surface as ``status=failed`` with a clear
+    diagnostic. The dispatcher still promises to always return an
+    ``ExternalActionResult`` (no raise escapes ``execute``)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 200 OK but no ``id`` — contract violation.
+        return httpx.Response(200, json={"htmlLink": "https://calendar.google.com/x"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleCalendarAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(_make_event_action(), dry_run=False)
+
+    assert result.status == "failed", result
+    err = (result.error or "").lower()
+    assert "id" in err, (
+        "Failure message must name the missing field so operators can "
+        "diagnose without digging into the raw response."
+    )
+    # external_id must NOT be the empty string masquerading as a real id.
+    assert result.external_id in (None, ""), result
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_series_missing_id_mid_series_preserves_created_ids() -> None:
+    """Round-4 PR A follow-up — ``_MissingEventIdError`` raised mid-series
+    must degrade into the issue-2 partial-failure surface, NOT propagate
+    out and lose the IDs of events created before it.
+
+    ``create_checkpoint_series`` catches httpx errors per-iteration to
+    preserve ``created``; ``_MissingEventIdError`` (a plain Exception,
+    not an httpx type) was initially uncaught — a 200-without-id on the
+    3rd checkpoint would have raised straight to ``execute()``'s
+    handler, dropping the cleanup list for checkpoints 1 + 2.
+
+    Contract: status=failed, the created event IDs appear in the audit
+    error, and the message is the "partially created — delete stray
+    events" variant (created list is non-empty)."""
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if call_count["n"] <= 2:
+            return httpx.Response(
+                200,
+                json={
+                    "id": f"checkpoint-evt-{call_count['n']}",
+                    "htmlLink": f"https://calendar.google.com/e/{call_count['n']}",
+                },
+            )
+        # 3rd checkpoint: 200 OK but NO ``id`` — contract violation.
+        return httpx.Response(200, json={"htmlLink": "https://calendar.google.com/x"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleCalendarAdapter(settings=_real_settings(), client=client)
+        result = await adapter.execute(
+            _make_series_action(offsets_days=[30, 14, 7]), dry_run=False
+        )
+
+    assert result.status == "failed", result
+    err = result.error or ""
+    # Created checkpoints 1 + 2 must survive for operator cleanup.
+    assert "checkpoint-evt-1" in err
+    assert "checkpoint-evt-2" in err
+    # The missing-id diagnostic must surface.
+    assert "missing event id" in err.lower()
+    # Non-empty created list → "delete the stray events" message variant.
+    assert "stray events" in (result.message or "").lower()

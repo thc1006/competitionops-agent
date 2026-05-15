@@ -297,12 +297,21 @@ class PlaneAdapter:
         )
         # C1 — Real-mode adapters MUST honor dry_run BEFORE any HTTP call.
         # Mock mode has no side effects so it stays on the normal path.
+        #
+        # Round-4 PR A (High#2) — always produce a preview when
+        # dry_run + real_mode + recognized action type, mirroring
+        # Drive / Docs / Sheets / Calendar. Previously Plane fell
+        # through to the KeyError path when ``title`` was absent; that
+        # made Plane the lone adapter that surfaced a malformed action
+        # as ``failed`` during preview while the other four rendered a
+        # ``dry_run`` preview. ``_dry_run_preview`` now derives its
+        # hash key with an ``action_id`` fallback (issue-5 pattern), so
+        # a titleless action still gets a distinct synthetic id. The
+        # real-execution path still rejects a titleless issue with the
+        # ``missing payload field`` error — the preview is a preview,
+        # not a success guarantee.
         if dry_run and self.real_mode and action.type == "plane.create_issue":
-            title = action.payload.get("title")
-            if title:
-                return self._dry_run_preview(action, title=title)
-            # Fall through so the KeyError path below reports the
-            # missing-title error consistently.
+            return self._dry_run_preview(action)
         try:
             if action.type == "plane.create_issue":
                 payload = action.payload
@@ -375,14 +384,19 @@ class PlaneAdapter:
     def _mode_label(self) -> str:
         return "real" if self.real_mode else "mock"
 
-    def _dry_run_preview(
-        self, action: ExternalAction, *, title: str
-    ) -> ExternalActionResult:
+    def _dry_run_preview(self, action: ExternalAction) -> ExternalActionResult:
         """Build a synthetic preview without hitting Plane.
 
-        The external_id is hashed off the title so the same plan
+        The external_id is hashed off the issue title so the same plan
         produces a stable preview id across re-runs — handy for the
         approval UI showing PMs which issue would be created.
+
+        Round-4 PR A (High#2) — the hash key falls back to
+        ``action.action_id`` when the payload carries no ``title``
+        (issue-5 pattern, shared with Drive / Docs / Sheets /
+        Calendar). A titleless action is malformed and will fail on
+        real execution, but the preview still renders a distinct
+        synthetic id rather than collapsing onto ``sha1("")``.
 
         Cross-adapter contract — Drive's ``_dry_run_preview`` shares
         the same shape, and ``tests/test_dry_run_contract.py`` pins
@@ -390,7 +404,8 @@ class PlaneAdapter:
         Any change to the format below must be paired with the test
         update; a drift would fail CI and surface during PR review.
         """
-        preview_id = f"dry_run_{_hash(title)}"
+        key = action.payload.get("title") or action.action_id
+        preview_id = f"dry_run_{_hash(key)}"
         return ExternalActionResult(
             action_id=action.action_id,
             target_system="plane",
