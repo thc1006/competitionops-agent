@@ -182,6 +182,125 @@ config (``PDF_ADAPTER=docling`` against a slim image) surfaces as a
 clear ``RuntimeError`` at the first PDF upload pointing at
 ``--build-arg INCLUDE_OCR=1``.
 
+## Enabling Crawl4AI (real web ingestion) — egress restriction is mandatory
+
+P1-006 Sprint 2 ships ``Crawl4AIWebAdapter`` for ``POST /briefs/extract/url``.
+Activate by setting ``WEB_ADAPTER=crawl4ai`` in the configmap AND
+including the ``[web]`` extra at install time (``uv sync --extra web``).
+Crawl4AI ships ~200MB of Playwright + Chromium; operators who don't
+need real web ingestion should leave ``WEB_ADAPTER`` unset (mock
+adapter, no install footprint).
+
+**SSRF defence requires BOTH layers:**
+
+1. **Pydantic validator** (Sprint 1, in-process) — resolves the URL's
+   hostname once and rejects on banned IP ranges (loopback / RFC-1918 /
+   link-local / IPv6 ULA / 169.254.169.254 cloud metadata / reserved /
+   multicast / unspecified). See ``main._validate_url_safety``.
+
+2. **NetworkPolicy** (this section, cluster-level) — closes the DNS
+   rebinding gap. Crawl4AI's Playwright backend re-resolves DNS at
+   connect time; a malicious authoritative server can return a public
+   IP to the validator and a private IP to the browser. The validator
+   ALONE cannot stop that.
+
+Minimum NetworkPolicy for the API pod when ``WEB_ADAPTER=crawl4ai``:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: competitionops-api-egress
+  namespace: competitionops
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: competitionops
+      app.kubernetes.io/component: api
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8         # RFC1918
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16     # link-local incl. cloud metadata
+              - 127.0.0.0/8        # loopback (cluster shouldn't route here anyway)
+              - 100.64.0.0/10      # CGNAT (k8s pod / service CIDRs often overlap)
+    # Plus DNS egress to cluster DNS so Crawl4AI's browser can resolve.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+```
+
+Adjust the ``except`` list to your cluster's network plan (e.g., add
+``172.16.0.0/12`` only if it's actually internal; remove if pod CIDR
+lives there). The default above is conservative for a typical
+cloud-hosted cluster.
+
+Without this policy, the validator's resolve-once check is
+defeatable by DNS rebinding — Sprint 2's adapter has no way to
+re-validate at connect time. Treat the NetworkPolicy as part of the
+deploy contract: ``WEB_ADAPTER=crawl4ai`` without it is a security
+regression, not a configuration choice.
+
+### Browser cache vs ``readOnlyRootFilesystem: true``
+
+The base ``deployment.yaml`` hardening sets ``readOnlyRootFilesystem: true``
+(see "Hardening highlights" above). Playwright (under Crawl4AI) writes
+browser binaries + per-session state to ``~/.cache/ms-playwright/`` by
+default — a path on the read-only root that the runtime user
+(``runAsUser: 65532``) can't create. The first ``/briefs/extract/url``
+request fails with ``EROFS: read-only file system`` mid-fetch.
+
+Two ways to close this:
+
+**Option A (recommended) — bake the browser into the image at build time.**
+The default ``infra/docker/Dockerfile`` does not run ``playwright install``;
+extend it (or maintain a separate ``Dockerfile.web``) with a stage that
+runs ``playwright install --with-deps chromium`` AFTER the
+``--extra web`` install, writing into a writable image layer. The
+result is a self-contained image — no writable mount needed at runtime.
+
+**Option B — runtime writable cache via emptyDir.** Add a sized
+emptyDir mount + point Playwright at it via env var:
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /var/cache/playwright
+          volumeMounts:
+            - name: playwright-cache
+              mountPath: /var/cache/playwright
+      volumes:
+        - name: playwright-cache
+          emptyDir:
+            sizeLimit: 512Mi   # Chromium + dependencies ≈ 300MB
+```
+
+Chromium binaries pre-download on first fetch (~30s cold start), then
+sit in the emptyDir for the pod's lifetime. Each pod restart re-downloads
+— acceptable for low-volume web ingestion. Operators running high
+throughput should prefer Option A.
+
+Either option must be in place BEFORE flipping ``WEB_ADAPTER=crawl4ai``.
+The base manifests deliberately stay minimal (no Playwright wiring) so
+operators who don't need real web ingestion don't pay the storage cost.
+
 ## Secrets
 
 ``secret.template.yaml`` ships in the repo with seven empty fields.

@@ -157,23 +157,228 @@ def test_runtime_web_adapter_factory_raises_on_unknown_value(
         runtime._web_adapter()
 
 
-def test_runtime_web_adapter_factory_rejects_crawl4ai_in_sprint_0(
+def test_runtime_web_adapter_factory_constructs_crawl4ai_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``WEB_ADAPTER=crawl4ai`` is reserved for Sprint 2. Sprint 0
-    explicitly raises ``RuntimeError`` with operator guidance so a
-    half-real config (env-toggled but no implementation) never reaches
-    the request path. When Sprint 2 lands and implements
-    ``Crawl4AIWebAdapter``, this test should be REPLACED (not deleted)
-    by a positive test asserting the real adapter is constructed.
-    Keeping the guard explicit prevents the Sprint 2 author from
-    forgetting to remove the placeholder raise."""
+    """Sprint 2 — ``WEB_ADAPTER=crawl4ai`` constructs the real
+    ``Crawl4AIWebAdapter`` (replaces Sprint 0's placeholder RuntimeError).
+
+    No real Crawl4AI install required for this test — the adapter's
+    constructor is side-effect-free (lazy import inside ``fetch``).
+    Sprint 2's Sprint-0 placeholder test was REPLACED (not deleted)
+    by this positive test per the Sprint-0 docstring directive."""
     from competitionops import runtime
+    from competitionops.adapters.web_crawl4ai import Crawl4AIWebAdapter
 
     reset_runtime_caches()
     monkeypatch.setenv("WEB_ADAPTER", "crawl4ai")
-    with pytest.raises(RuntimeError, match="Sprint 2"):
-        runtime._web_adapter()
+    adapter = runtime._web_adapter()
+    assert isinstance(adapter, Crawl4AIWebAdapter)
+
+
+def test_runtime_web_adapter_factory_surfaces_missing_crawl4ai_dep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``WEB_ADAPTER=crawl4ai`` but the ``[web]`` extra hasn't been
+    installed, the FIRST ``fetch`` call must raise ``RuntimeError`` with
+    operator guidance — not a bare ``ImportError`` that's hard to act on.
+
+    The adapter constructor doesn't import Crawl4AI (lazy pattern), so
+    factory construction succeeds. The ImportError surfaces on the
+    first fetch. Tests simulate "package not installed" by intercepting
+    the adapter's resolver indirection."""
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    def fake_resolver():  # type: ignore[no-untyped-def]
+        raise ImportError("No module named 'crawl4ai'")
+
+    monkeypatch.setattr(web_crawl4ai, "_resolve_async_web_crawler", fake_resolver)
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    with pytest.raises(RuntimeError, match="uv sync --extra web"):
+        asyncio.run(adapter.fetch("https://example.com/comp"))
+
+
+def test_crawl4ai_adapter_maps_crawl_result_to_web_ingestion_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint 2 mapping contract — Crawl4AI's ``CrawlResult`` shape
+    (``success``, ``url``, ``markdown``, ``metadata``) lands cleanly
+    into our ``WebIngestionResult`` (``url``, ``title``, ``text``).
+
+    ``CrawlResult.url`` is the canonical post-redirect URL → our
+    ``url``. ``CrawlResult.metadata['title']`` → our ``title``.
+    ``CrawlResult.markdown`` → our ``text`` (cleaned LLM-ready content).
+    """
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    class FakeCrawlResult:
+        success = True
+        url = "https://example.com/canonical-redirected"
+        markdown = "# RunSpace 2026\n\nSubmission deadline 2026-06-15."
+        metadata = {"title": "RunSpace Innovation Challenge"}
+        error_message: str | None = None
+
+    class FakeAsyncWebCrawler:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def arun(self, *, url: str, **_kwargs):  # type: ignore[no-untyped-def]
+            return FakeCrawlResult()
+
+    monkeypatch.setattr(
+        web_crawl4ai, "_resolve_async_web_crawler", lambda: FakeAsyncWebCrawler
+    )
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    result = asyncio.run(adapter.fetch("https://example.com/comp"))
+
+    assert result.url == "https://example.com/canonical-redirected"
+    assert result.title == "RunSpace Innovation Challenge"
+    assert "RunSpace 2026" in result.text
+    assert "2026-06-15" in result.text
+
+
+def test_crawl4ai_adapter_raises_on_failed_crawl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Crawl4AI returns ``success=False``, the adapter must
+    surface a ``RuntimeError`` with the upstream error message — not
+    return a half-empty ``WebIngestionResult`` that the brief extractor
+    would interpret as "no content found"."""
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    class FakeCrawlResult:
+        success = False
+        url = "https://example.com/x"
+        markdown = ""
+        metadata: dict[str, str] = {}
+        error_message = "net::ERR_NAME_NOT_RESOLVED"
+
+    class FakeAsyncWebCrawler:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def arun(self, *, url: str, **_kwargs):  # type: ignore[no-untyped-def]
+            return FakeCrawlResult()
+
+    monkeypatch.setattr(
+        web_crawl4ai, "_resolve_async_web_crawler", lambda: FakeAsyncWebCrawler
+    )
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    with pytest.raises(RuntimeError, match="ERR_NAME_NOT_RESOLVED"):
+        asyncio.run(adapter.fetch("https://example.com/x"))
+
+
+def test_crawl4ai_adapter_handles_markdown_generation_result_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #32 deep-review polish A — Crawl4AI 0.5+ changed
+    ``result.markdown`` from a plain ``str`` to a
+    ``MarkdownGenerationResult`` object with ``.raw_markdown`` /
+    ``.fit_markdown`` attributes. The adapter must extract the string
+    content rather than passing the object directly to Pydantic
+    (which would either coerce to an opaque repr or fail validation).
+
+    This test pins the defensive coercion: if ``markdown`` has a
+    ``raw_markdown`` attr, use it; else stringify whatever's there.
+    """
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    class FakeMarkdownGenerationResult:
+        raw_markdown = "# Cleaned content\n\nDeadline 2026-06-15."
+        fit_markdown = "# Filtered\n\nKey detail."
+
+    class FakeCrawlResult:
+        success = True
+        url = "https://example.com/x"
+        markdown = FakeMarkdownGenerationResult()  # object, NOT str
+        metadata = {"title": "Test"}
+        error_message: str | None = None
+
+    class FakeAsyncWebCrawler:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def arun(self, *, url: str, **_kwargs):  # type: ignore[no-untyped-def]
+            return FakeCrawlResult()
+
+    monkeypatch.setattr(
+        web_crawl4ai, "_resolve_async_web_crawler", lambda: FakeAsyncWebCrawler
+    )
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    result = asyncio.run(adapter.fetch("https://example.com/x"))
+
+    # The adapter must surface the raw_markdown content as a string,
+    # not the object's repr or a stringified placeholder.
+    assert "Cleaned content" in result.text
+    assert "2026-06-15" in result.text
+    assert isinstance(result.text, str)
+    # Repr leakage check — the object's class name must NOT appear.
+    assert "FakeMarkdownGenerationResult" not in result.text
+
+
+def test_crawl4ai_adapter_redacts_playwright_exception_class_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #32 deep-review polish C — leak surface. Crawl4AI's
+    Playwright backend can raise its own exception types
+    (``TimeoutError``, ``TargetClosedError``, ``Playwright.Error``)
+    whose ``str(exc)`` may embed the URL, the page's DOM state, or
+    internal Playwright details. Bubbling those uncaught to FastAPI
+    surfaces them in the 500 response body.
+
+    The adapter must catch broad exceptions during the fetch and
+    surface ONLY the class name — same M8/M4 redaction discipline
+    the Google adapters follow.
+    """
+    import asyncio
+    from competitionops.adapters import web_crawl4ai
+
+    class FakePlaywrightError(Exception):
+        """Stand-in for playwright._impl._api_types.Error etc."""
+
+    class FakeAsyncWebCrawler:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+            return False
+
+        async def arun(self, *, url: str, **_kwargs):  # type: ignore[no-untyped-def]
+            raise FakePlaywrightError(
+                "browser crashed while navigating to "
+                "https://attacker.example.com/SECRET-INTERNAL-DOM-STATE-LEAK"
+            )
+
+    monkeypatch.setattr(
+        web_crawl4ai, "_resolve_async_web_crawler", lambda: FakeAsyncWebCrawler
+    )
+
+    adapter = web_crawl4ai.Crawl4AIWebAdapter()
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(adapter.fetch("https://attacker.example.com/x"))
+    msg = str(excinfo.value)
+    # Class name is the operator's diagnostic signal — must surface.
+    assert "FakePlaywrightError" in msg
+    # The exception body is the leak surface — must NOT surface.
+    assert "SECRET-INTERNAL-DOM-STATE-LEAK" not in msg
+    assert "browser crashed" not in msg
 
 
 def test_main_module_eager_validates_web_adapter() -> None:

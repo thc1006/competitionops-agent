@@ -160,10 +160,13 @@ def _web_adapter() -> WebIngestionPort:
     - ``None`` / ``"mock"`` (default): Sprint 0's ``MockWebAdapter`` —
       returns registered fixtures or deterministic synthetic content.
       No network. Fine for tests + CI + dry-run previews.
-    - ``"crawl4ai"`` (Sprint 2, not yet implemented): real Crawl4AI-
-      backed browser scraping. Requires ``uv sync --extra web``.
-      Currently raises ``RuntimeError`` pointing at the Sprint 2
-      backlog item so operators don't ship a half-real config.
+    - ``"crawl4ai"`` (Sprint 2): real Crawl4AI-backed browser scraping.
+      Construction is side-effect-free (lazy import inside ``fetch``);
+      the actual ``crawl4ai`` package is imported on first fetch.
+      Missing ``[web]`` extra surfaces as ``RuntimeError`` with
+      operator guidance on the first fetch, NOT at module import — so
+      operators can flip ``WEB_ADAPTER=crawl4ai`` ahead of installing
+      the extra without breaking pod startup.
 
     Unknown values raise ``ValueError`` — mirrors the round-3 M1
     pattern for PDF_ADAPTER. Wired through ``main.get_web_adapter``.
@@ -175,11 +178,13 @@ def _web_adapter() -> WebIngestionPort:
     if choice == "mock":
         return MockWebAdapter()
     if choice == "crawl4ai":
-        raise RuntimeError(
-            "WEB_ADAPTER=crawl4ai is reserved for P1-006 Sprint 2 — "
-            "the real Crawl4AI-backed adapter has not landed yet. "
-            "Unset WEB_ADAPTER (or set to ``mock``) until Sprint 2 ships."
-        )
+        # Sprint 2 — real adapter. Construction is side-effect-free
+        # (lazy import inside ``fetch``); the heavy ``crawl4ai``
+        # package only loads on the first request. If the ``[web]``
+        # extra is missing, ``fetch`` raises a clear RuntimeError
+        # pointing at ``uv sync --extra web``.
+        from competitionops.adapters.web_crawl4ai import Crawl4AIWebAdapter
+        return Crawl4AIWebAdapter()
     raise ValueError(
         f"Unknown web_adapter / WEB_ADAPTER value: {raw!r} "
         f"(normalized to {choice!r}). Expected one of "
