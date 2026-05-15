@@ -566,3 +566,70 @@ def test_dry_run_preview_falls_back_to_action_id_when_payload_empty() -> None:
         "action_ids must produce different synthetic ids — otherwise "
         "the approval UI de-dupes distinct actions into one."
     )
+
+
+# ---------------------------------------------------------------------------
+# P2-005 Sprint 5 — download_file (read-only PDF ingestion path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_download_file_mock_returns_registered_content() -> None:
+    """Mock mode — ``register_file_content`` injects fixture bytes;
+    ``download_file`` returns them verbatim. Read-only path, no
+    ExternalAction / dry_run machinery."""
+    adapter = GoogleDriveAdapter(settings=Settings())  # no token → mock
+    adapter.register_file_content("file-abc", b"%PDF-fixture-bytes")
+
+    content = await adapter.download_file(file_id="file-abc")
+    assert content == b"%PDF-fixture-bytes"
+
+
+@pytest.mark.asyncio
+async def test_download_file_mock_synthetic_for_unregistered() -> None:
+    """An unregistered file id yields deterministic synthetic PDF bytes
+    (starts with the ``%PDF-`` magic so the endpoint's magic check
+    passes). Mirrors MockWebAdapter's two-mode design."""
+    adapter = GoogleDriveAdapter(settings=Settings())
+    content = await adapter.download_file(file_id="unknown-xyz")
+    assert content.startswith(b"%PDF-")
+    # Deterministic per id.
+    assert content == await adapter.download_file(file_id="unknown-xyz")
+
+
+@pytest.mark.asyncio
+async def test_download_file_real_gets_files_media_endpoint() -> None:
+    """Real mode — ``GET /drive/v3/files/{id}`` with ``alt=media`` query
+    param + Bearer auth. Returns the raw response bytes."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        captured["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, content=b"%PDF-real-drive-bytes")
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
+        content = await adapter.download_file(file_id="real-file-1")
+
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/drive/v3/files/real-file-1"
+    assert captured["query"].get("alt") == "media"
+    assert captured["auth"] == "Bearer ya29.test-bearer"
+    assert content == b"%PDF-real-drive-bytes"
+
+
+@pytest.mark.asyncio
+async def test_download_file_real_raises_httpstatuserror_on_404() -> None:
+    """A 404 from Drive surfaces as ``httpx.HTTPStatusError`` — the
+    download path does ``raise_for_status()`` and lets the caller
+    (the endpoint) map it to a clean HTTP response."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "not found"})
+
+    async with _mock_transport(handler) as client:
+        adapter = GoogleDriveAdapter(settings=_real_settings(), client=client)
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.download_file(file_id="missing")

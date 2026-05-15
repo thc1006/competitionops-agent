@@ -75,6 +75,15 @@ class GoogleDriveAdapter:
         self.folders: dict[str, dict[str, Any]] = {}
         self.files: dict[str, dict[str, Any]] = {}
         self.calls: list[dict[str, Any]] = []
+        # P2-005 Sprint 5 — mock-mode file content fixtures for the
+        # read-only ``download_file`` path. Tests inject via
+        # ``register_file_content``.
+        self.file_contents: dict[str, bytes] = {}
+
+    def register_file_content(self, file_id: str, content: bytes) -> None:
+        """Register fixture bytes for ``download_file`` in mock mode.
+        Idempotent — re-registering the same id overwrites."""
+        self.file_contents[file_id] = content
 
     @property
     def real_mode(self) -> bool:
@@ -207,6 +216,50 @@ class GoogleDriveAdapter:
             return
         async with httpx.AsyncClient() as client:
             yield client
+
+    async def download_file(self, *, file_id: str) -> bytes:
+        """Download a Drive file's raw content (P2-005 Sprint 5).
+
+        Read-only — NOT an ``ExternalActionExecutor`` action. CLAUDE.md
+        rule #4's approval gate covers move / delete / permission
+        changes, not reads, so this path has no ``dry_run`` / audit
+        machinery and returns plain ``bytes``.
+
+        Real mode: ``GET {base}/drive/v3/files/{id}?alt=media`` with a
+        Bearer header. ``raise_for_status()`` lets the caller (the
+        ``/briefs/extract/drive`` endpoint) map HTTP errors to clean
+        responses + redact network errors.
+
+        Mock mode: returns fixture bytes registered via
+        ``register_file_content``; an unregistered id yields
+        deterministic synthetic ``%PDF-`` bytes so the endpoint's
+        magic-byte gate still passes (mirrors MockWebAdapter)."""
+        if self.real_mode:
+            return await self._real_download_file(file_id=file_id)
+        return self._mock_download_file(file_id=file_id)
+
+    def _mock_download_file(self, *, file_id: str) -> bytes:
+        if file_id in self.file_contents:
+            return self.file_contents[file_id]
+        return b"%PDF-mock-drive-content-" + file_id.encode("utf-8")
+
+    async def _real_download_file(self, *, file_id: str) -> bytes:
+        s = self.settings
+        assert s.google_oauth_access_token is not None  # for mypy
+        token = s.google_oauth_access_token.get_secret_value()
+        download_url = (
+            s.google_drive_api_base.rstrip("/") + _DRIVE_FILES_PATH + f"/{file_id}"
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        async with self._client_session() as client:
+            response = await client.get(
+                download_url,
+                params={"alt": "media"},
+                headers=headers,
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.content
 
     async def move_file(
         self, *, file_id: str, target_parent_id: str

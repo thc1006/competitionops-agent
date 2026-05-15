@@ -81,6 +81,40 @@ Errors:
   the real adapter, or `WEB_ADAPTER=crawl4ai` while still in Sprint
   0 / without `--extra web`).
 
+## POST /briefs/extract/drive
+
+P2-005 Sprint 5 — pull a PDF from a Google Drive file id and return a
+structured `CompetitionBrief`. Reuses the `/briefs/extract/pdf`
+pipeline (same `PDF_ADAPTER` engine, same 10 MiB cap, same `%PDF-`
+magic gate) and stamps `source_uri = drive://<file_id>`.
+
+Reading a Drive file is low-risk (CLAUDE.md rule #4's approval gate
+covers move / delete / permission changes, not reads) — no dry_run.
+
+Request:
+
+```json
+{
+  "file_id": "1AbCdEf...drive-file-id"
+}
+```
+
+- `file_id`: required, non-empty / non-whitespace.
+- Real Drive access activates when `Settings.google_oauth_access_token`
+  is set; otherwise the mock adapter returns canned bytes.
+
+Response (`200 OK`): same `CompetitionBrief` shape as
+`/briefs/extract`, with `source_uri = "drive://<file_id>"`.
+
+Errors:
+- `422 Unprocessable Entity` — missing/empty `file_id`, or the
+  downloaded file does not start with the `%PDF-` magic bytes.
+- `413 Content Too Large` — the Drive file exceeds the 10 MiB cap.
+- `404 Not Found` — Drive has no file with that id.
+- `502 Bad Gateway` — Drive returned a non-404 error status, or a
+  network-class failure during the download (the exception class name
+  surfaces; the body is redacted).
+
 ## POST /plans/generate
 
 Produces an `ActionPlan` from a `CompetitionBrief` plus optional team
