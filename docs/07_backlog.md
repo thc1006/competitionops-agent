@@ -858,4 +858,17 @@ masking, registry threading).
 
 Out of scope: rotating a refresh token that Google itself rotates on
 use; proactive background refresh (refresh is lazy, on first
-expired-cache read); 429 backoff on the token endpoint.
+expired-cache read); 429 backoff on the token endpoint; a 401-feedback
+path so an adapter can force-refresh a token revoked mid-lifetime
+(deep-review finding C — a revoked access token is served from cache
+until ``_expires_at``, then auto-recovers; acceptable for v1).
+
+Deep-review hardening (2026-05-17) — after the rewire, fetching a token
+can raise ``TokenRefreshError`` where the old static-bearer read could
+not. Two call sites were not updated: the four adapters' ``execute()``
+let it escape to ``execution.py``'s generic handler (finding A), and
+``/briefs/extract/drive`` let it escape as an unhandled 500 (finding B).
+Both now catch ``TokenRefreshError`` and return a clean,
+adapter-/endpoint-attributed result. ``token_provider_google`` was also
+added to the ``test_google_workspace_adapters`` no-real-SDK AST guard
+(finding D). Tests: 5 new in ``tests/test_adapter_token_refresh_handling.py``.

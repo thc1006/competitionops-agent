@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 from competitionops.adapters.google_drive import GoogleDriveAdapter
 
 from competitionops.adapters.registry import AdapterRegistry
+from competitionops.adapters.token_provider_google import TokenRefreshError
 from competitionops.config import Settings, get_settings
 from competitionops.ports import (
     AuditLogPort,
@@ -659,6 +660,14 @@ async def extract_brief_from_drive(
         raise HTTPException(
             status_code=502,
             detail=f"Drive download failed: {type(exc).__name__}",
+        )
+    except TokenRefreshError as exc:
+        # The TokenProvider could not mint an access token (refresh token
+        # expired / revoked, OAuth endpoint down). ``exc`` carries only a
+        # pre-redacted summary — safe to surface in the response detail.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Drive auth failed: {exc}",
         )
 
     # Post-download cap + magic gate — shared helpers, same checks the
