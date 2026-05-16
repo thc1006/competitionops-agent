@@ -65,3 +65,24 @@ class WebIngestionPort(Protocol):
     """
 
     async def fetch(self, url: str) -> WebIngestionResult: ...
+
+
+class TokenProvider(Protocol):
+    """Supplies a currently-valid OAuth access token to the Google adapters.
+
+    The Drive / Docs / Sheets / Calendar adapters call
+    ``get_access_token`` for each real-mode request instead of reading a
+    static Settings bearer. Two implementations:
+
+    - ``StaticTokenProvider`` — returns an operator-wired bearer verbatim
+      (e.g. an OAuth Playground token pasted into ``GOOGLE_OAUTH_ACCESS_TOKEN``).
+      No refresh; the operator re-supplies the token when it expires.
+    - ``GoogleOAuthTokenProvider`` — exchanges a long-lived refresh token
+      for short-lived access tokens on demand, caching each until just
+      before expiry, so PMs stop re-pasting hourly tokens.
+
+    Implementations must be safe to call concurrently — the four Google
+    adapters share one provider instance via the registry.
+    """
+
+    async def get_access_token(self) -> str: ...

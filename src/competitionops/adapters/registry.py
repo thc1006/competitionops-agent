@@ -4,7 +4,7 @@ from competitionops.adapters.google_docs import GoogleDocsAdapter
 from competitionops.adapters.google_drive import GoogleDriveAdapter
 from competitionops.adapters.google_sheets import GoogleSheetsAdapter
 from competitionops.adapters.plane import PlaneAdapter
-from competitionops.ports import ExternalActionExecutor
+from competitionops.ports import ExternalActionExecutor, TokenProvider
 
 
 class AdapterRegistry:
@@ -23,12 +23,30 @@ class AdapterRegistry:
         return self._adapters.get(target_system)
 
 
-def build_default_registry() -> AdapterRegistry:
+def build_default_registry(
+    token_provider: TokenProvider | None = None,
+) -> AdapterRegistry:
+    """Build the adapter set every FastAPI request / MCP tool / workflow uses.
+
+    ``token_provider`` is threaded into the four Google adapters so they
+    share one process-wide provider (static bearer or refresh-backed).
+    When ``None`` — direct callers and older tests — each Google adapter
+    falls back to a static bearer derived from Settings. The registry
+    singleton in ``runtime`` passes ``runtime._token_provider()``.
+    """
     registry = AdapterRegistry()
-    registry.register("google_drive", GoogleDriveAdapter())
-    registry.register("google_docs", GoogleDocsAdapter())
-    registry.register("google_sheets", GoogleSheetsAdapter())
-    registry.register("google_calendar", GoogleCalendarAdapter())
+    registry.register(
+        "google_drive", GoogleDriveAdapter(token_provider=token_provider)
+    )
+    registry.register(
+        "google_docs", GoogleDocsAdapter(token_provider=token_provider)
+    )
+    registry.register(
+        "google_sheets", GoogleSheetsAdapter(token_provider=token_provider)
+    )
+    registry.register(
+        "google_calendar", GoogleCalendarAdapter(token_provider=token_provider)
+    )
     registry.register("plane", PlaneAdapter())
     registry.register("internal", FakeExternalActionExecutor())
     return registry

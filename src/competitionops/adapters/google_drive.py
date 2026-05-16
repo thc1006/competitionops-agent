@@ -40,7 +40,9 @@ from competitionops.adapters._http_errors import (
     safe_error_summary,
     safe_network_summary,
 )
+from competitionops.adapters.token_provider_static import StaticTokenProvider
 from competitionops.config import Settings, get_settings
+from competitionops.ports import TokenProvider
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
 _FOLDER_TYPES = frozenset(
@@ -68,9 +70,21 @@ class GoogleDriveAdapter:
         self,
         settings: Settings | None = None,
         client: httpx.AsyncClient | None = None,
+        token_provider: TokenProvider | None = None,
     ) -> None:
         self.settings = settings if settings is not None else get_settings()
         self._injected_client = client
+        # The registry injects the process-wide provider (static bearer
+        # or refresh-backed). Direct construction without one falls back
+        # to a static bearer derived from Settings — a test / dev
+        # affordance; the refresh path is wired only via the registry.
+        # An empty-string bearer counts as "no token" (mock mode), not a
+        # real-mode bearer that would 401 every call.
+        if token_provider is None:
+            bearer = self.settings.google_oauth_access_token
+            if bearer is not None and bearer.get_secret_value():
+                token_provider = StaticTokenProvider(bearer.get_secret_value())
+        self._token_provider = token_provider
         # Mock-mode state — used in tests, dry-run previews, and audit trail.
         self.folders: dict[str, dict[str, Any]] = {}
         self.files: dict[str, dict[str, Any]] = {}
@@ -87,19 +101,16 @@ class GoogleDriveAdapter:
 
     @property
     def real_mode(self) -> bool:
-        """Real REST mode is enabled iff ``google_oauth_access_token`` is set.
+        """Real REST mode is enabled iff a ``TokenProvider`` is wired.
 
-        ``google_drive_api_base`` defaults to the prod URL and is
-        non-empty at Settings construction (Pydantic's ``str`` type
-        check rejects ``None``; the URL validator raises on ``""``),
-        so it is never falsy at runtime — it is a configuration knob,
-        not a gate. Earlier revisions wrote this as
-        ``bool(token) and bool(base)``, implying both were required;
-        the second clause was dead code (review issue 1). The single-
-        condition form below matches the actual contract operators
-        observe. Pinned structurally by
+        The registry injects a provider whenever the operator configured
+        either a static bearer (``GOOGLE_OAUTH_ACCESS_TOKEN``) or a
+        refresh-token trio; with neither, the provider is ``None`` and
+        the adapter stays in deterministic mock mode. ``google_drive_api_base``
+        is a configuration knob (staging / emulator override), never a
+        gate. Pinned structurally by
         ``test_real_mode_property_does_not_reference_api_base_attribute``."""
-        return bool(self.settings.google_oauth_access_token)
+        return self._token_provider is not None
 
     # ---- high-level operations -------------------------------------
 
@@ -128,8 +139,8 @@ class GoogleDriveAdapter:
         self, *, name: str, parent_id: str | None
     ) -> dict[str, Any]:
         s = self.settings
-        assert s.google_oauth_access_token is not None  # for mypy
-        token = s.google_oauth_access_token.get_secret_value()
+        assert self._token_provider is not None  # for mypy — real_mode guards
+        token = await self._token_provider.get_access_token()
         list_url = s.google_drive_api_base.rstrip("/") + _DRIVE_FILES_PATH
         headers = {
             "Authorization": f"Bearer {token}",
@@ -245,8 +256,8 @@ class GoogleDriveAdapter:
 
     async def _real_download_file(self, *, file_id: str) -> bytes:
         s = self.settings
-        assert s.google_oauth_access_token is not None  # for mypy
-        token = s.google_oauth_access_token.get_secret_value()
+        assert self._token_provider is not None  # for mypy — real_mode guards
+        token = await self._token_provider.get_access_token()
         download_url = (
             s.google_drive_api_base.rstrip("/") + _DRIVE_FILES_PATH + f"/{file_id}"
         )

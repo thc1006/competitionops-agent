@@ -54,6 +54,7 @@ def reset_runtime_caches() -> None:
     runtime._registry.cache_clear()
     runtime._pdf_adapter.cache_clear()
     runtime._web_adapter.cache_clear()
+    runtime._token_provider.cache_clear()
 
 
 @pytest.fixture(autouse=True)
