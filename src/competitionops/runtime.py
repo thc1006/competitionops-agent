@@ -112,18 +112,34 @@ def _token_provider() -> TokenProvider | None:
     ``asyncio.Lock`` so the shared instance is concurrency-safe.
     """
     s = get_settings()
-    if (
-        s.google_oauth_refresh_token is not None
-        and s.google_oauth_client_id
-        and s.google_oauth_client_secret is not None
-    ):
+    # Gate on secret-value truthiness, not ``is not None`` — an
+    # empty-string secret (``GOOGLE_OAUTH_*=`` with no value, the common
+    # copied-but-unfilled .env case) must count as "not configured".
+    # Otherwise the adapters flip into real mode with an empty bearer
+    # and 401 every call instead of staying safely in mock mode.
+    refresh_token = (
+        s.google_oauth_refresh_token.get_secret_value()
+        if s.google_oauth_refresh_token is not None
+        else ""
+    )
+    client_secret = (
+        s.google_oauth_client_secret.get_secret_value()
+        if s.google_oauth_client_secret is not None
+        else ""
+    )
+    access_token = (
+        s.google_oauth_access_token.get_secret_value()
+        if s.google_oauth_access_token is not None
+        else ""
+    )
+    if refresh_token and s.google_oauth_client_id and client_secret:
         return GoogleOAuthTokenProvider(
             client_id=s.google_oauth_client_id,
-            client_secret=s.google_oauth_client_secret.get_secret_value(),
-            refresh_token=s.google_oauth_refresh_token.get_secret_value(),
+            client_secret=client_secret,
+            refresh_token=refresh_token,
         )
-    if s.google_oauth_access_token is not None:
-        return StaticTokenProvider(s.google_oauth_access_token.get_secret_value())
+    if access_token:
+        return StaticTokenProvider(access_token)
     return None
 
 

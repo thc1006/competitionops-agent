@@ -256,6 +256,23 @@ async def test_google_provider_network_error_raises_token_refresh_error() -> Non
         await provider.get_access_token()
 
 
+@pytest.mark.asyncio
+async def test_google_provider_raises_on_non_dict_json_body() -> None:
+    # A 200 response whose JSON body is an array (not an object) must
+    # raise TokenRefreshError, not a bare AttributeError from .get().
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not", "an", "object"])
+
+    provider = GoogleOAuthTokenProvider(
+        client_id="cid",
+        client_secret="cs",
+        refresh_token="1//rt",
+        client=_mock_client(handler),
+    )
+    with pytest.raises(TokenRefreshError):
+        await provider.get_access_token()
+
+
 def test_google_provider_satisfies_token_provider_protocol() -> None:
     provider: TokenProvider = GoogleOAuthTokenProvider(
         client_id="c", client_secret="s", refresh_token="r"

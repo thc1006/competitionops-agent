@@ -148,3 +148,44 @@ def test_build_default_registry_without_provider_stays_mock(
 def test_google_adapter_accepts_explicit_token_provider() -> None:
     adapter = GoogleDriveAdapter(token_provider=StaticTokenProvider("ya29.bearer"))
     assert adapter.real_mode is True
+
+
+# ---------------------------------------------------------------------------
+# Empty-string secrets count as "not configured" (review Medium #1)
+# ---------------------------------------------------------------------------
+
+
+def test_factory_treats_empty_bearer_as_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``GOOGLE_OAUTH_ACCESS_TOKEN=`` with no value is the common
+    # copied-but-unfilled .env case — it must resolve to mock mode, not
+    # a real-mode empty bearer that 401s every call.
+    _clear_google_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "")
+    reset_runtime_caches()
+    from competitionops import runtime
+
+    assert runtime._token_provider() is None
+
+
+def test_factory_treats_empty_refresh_trio_as_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_google_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_OAUTH_REFRESH_TOKEN", "")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "")
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    reset_runtime_caches()
+    from competitionops import runtime
+
+    assert runtime._token_provider() is None
+
+
+def test_adapter_empty_bearer_stays_in_mock_mode() -> None:
+    # The adapter's Settings-derived fallback must also treat an empty
+    # SecretStr as "no token".
+    adapter = GoogleDriveAdapter(
+        settings=Settings(google_oauth_access_token=SecretStr(""))
+    )
+    assert adapter.real_mode is False

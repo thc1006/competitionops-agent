@@ -92,13 +92,12 @@ class GoogleSheetsAdapter:
         # or refresh-backed). Direct construction without one falls back
         # to a static bearer derived from Settings — a test / dev
         # affordance; the refresh path is wired only via the registry.
-        if (
-            token_provider is None
-            and self.settings.google_oauth_access_token is not None
-        ):
-            token_provider = StaticTokenProvider(
-                self.settings.google_oauth_access_token.get_secret_value()
-            )
+        # An empty-string bearer counts as "no token" (mock mode), not a
+        # real-mode bearer that would 401 every call.
+        if token_provider is None:
+            bearer = self.settings.google_oauth_access_token
+            if bearer is not None and bearer.get_secret_value():
+                token_provider = StaticTokenProvider(bearer.get_secret_value())
         self._token_provider = token_provider
         # Mock-mode state — used in tests, dry-run previews, and audit trail.
         self.sheets: dict[str, dict[str, Any]] = {}

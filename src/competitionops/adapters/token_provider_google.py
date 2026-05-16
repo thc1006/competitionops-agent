@@ -115,16 +115,30 @@ class GoogleOAuthTokenProvider:
             ) from exc
 
         try:
-            data: dict[str, Any] = response.json()
+            payload: Any = response.json()
         except ValueError as exc:
             raise TokenRefreshError(
                 "oauth token endpoint returned a non-JSON body"
             ) from exc
+        # Mirror the defensive ``isinstance(..., dict)`` checks in
+        # ``_http_errors`` and the Google adapters: a non-object JSON
+        # body (array / string) must degrade to a clean
+        # ``TokenRefreshError``, not a bare ``AttributeError`` from
+        # ``.get`` on a list.
+        if not isinstance(payload, dict):
+            raise TokenRefreshError(
+                "oauth token endpoint returned a non-object JSON body"
+            )
+        data: dict[str, Any] = payload
         token = data.get("access_token")
         if not isinstance(token, str) or not token:
             raise TokenRefreshError(
                 "oauth token endpoint response missing 'access_token'"
             )
+        # ``data.get("refresh_token")`` is intentionally NOT consumed:
+        # Google may return a rotated refresh token, but persisting a
+        # rotated token is out of scope for P2-006 — the operator-supplied
+        # refresh token stays the source of truth. See 07_backlog.md.
         expires_in = data.get("expires_in", _DEFAULT_EXPIRES_IN)
         try:
             lifetime = float(expires_in)
