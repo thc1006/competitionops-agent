@@ -62,7 +62,9 @@ from competitionops.adapters._http_errors import (
     safe_error_summary,
     safe_network_summary,
 )
+from competitionops.adapters.token_provider_static import StaticTokenProvider
 from competitionops.config import Settings, get_settings
+from competitionops.ports import TokenProvider
 from competitionops.schemas import ExternalAction, ExternalActionResult
 
 _DEFAULT_OFFSETS_DAYS: tuple[int, ...] = (30, 14, 7, 1)
@@ -106,25 +108,39 @@ class GoogleCalendarAdapter:
         self,
         settings: Settings | None = None,
         client: httpx.AsyncClient | None = None,
+        token_provider: TokenProvider | None = None,
     ) -> None:
         self.settings = settings if settings is not None else get_settings()
         self._injected_client = client
+        # The registry injects the process-wide provider (static bearer
+        # or refresh-backed). Direct construction without one falls back
+        # to a static bearer derived from Settings — a test / dev
+        # affordance; the refresh path is wired only via the registry.
+        if (
+            token_provider is None
+            and self.settings.google_oauth_access_token is not None
+        ):
+            token_provider = StaticTokenProvider(
+                self.settings.google_oauth_access_token.get_secret_value()
+            )
+        self._token_provider = token_provider
         # Mock-mode state — used in tests, dry-run previews, and audit trail.
         self.events: dict[str, dict[str, Any]] = {}
         self.calls: list[dict[str, Any]] = []
 
     @property
     def real_mode(self) -> bool:
-        """Real REST mode is enabled iff ``google_oauth_access_token`` is set.
+        """Real REST mode is enabled iff a ``TokenProvider`` is wired.
 
-        ``google_calendar_api_base`` defaults to the prod URL and is
-        non-empty at Settings construction (Pydantic's ``str`` type
-        check rejects ``None``; the URL validator raises on ``""``),
-        so it is never falsy at runtime — it is a configuration knob,
-        not a gate. Pinned structurally by
+        The registry injects a provider whenever the operator configured
+        either a static bearer (``GOOGLE_OAUTH_ACCESS_TOKEN``) or a
+        refresh-token trio; with neither, the provider is ``None`` and
+        the adapter stays in deterministic mock mode. ``google_calendar_api_base``
+        is a configuration knob (staging / emulator override), never a
+        gate. Pinned structurally by
         ``test_real_mode_property_does_not_reference_api_base_attribute``.
         """
-        return bool(self.settings.google_oauth_access_token)
+        return self._token_provider is not None
 
     # ---- high-level operations --------------------------------------
 
@@ -244,8 +260,8 @@ class GoogleCalendarAdapter:
         ``KeyError`` on real. Same issue-4 surface as Docs P1-001.
         """
         s = self.settings
-        assert s.google_oauth_access_token is not None  # for mypy
-        token = s.google_oauth_access_token.get_secret_value()
+        assert self._token_provider is not None  # for mypy — real_mode guards
+        token = await self._token_provider.get_access_token()
         events_url = (
             s.google_calendar_api_base.rstrip("/")
             + f"/calendar/v3/calendars/{calendar_id}/events"

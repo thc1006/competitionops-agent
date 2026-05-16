@@ -353,9 +353,12 @@ def test_real_mode_property_does_not_reference_api_base_attribute() -> None:
     no behaviour test catches it — the docstring-vs-code drift the
     issue-1 refactor closed quietly reopens.
 
-    This AST check is the structural backstop: ``real_mode`` is
-    allowed to inspect ONLY ``google_oauth_access_token``. Any other
-    Settings attribute access inside the property fails the test.
+    This AST check is the structural backstop: ``real_mode`` must not
+    reference the ``*_api_base`` Settings attribute. Since the
+    TokenProvider refresh port, ``real_mode`` reads ``_token_provider``
+    instead of a Settings field directly — but the api_base ban still
+    stands: the base URL is a staging / emulator configuration knob,
+    never a gate.
     """
     import ast
     for module, banned in (

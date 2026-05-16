@@ -817,3 +817,45 @@ behavioural test sends a 15 MiB body and asserts the total bytes read
 stay under ``limit + 2 MiB`` chunk-overshoot allowance; a structural
 test greps the handler source for ``file.read()`` to catch silent
 reverts.
+
+### P2-006 — OAuth token refresh (TokenProvider port)
+
+Status: **Done (2026-05-16)** — closes the P1-001/002/003 deferral
+"OAuth refresh stays operator-driven via the access-token field".
+
+``TokenProvider`` Protocol (``async get_access_token() -> str``) in
+``ports.py``. The four Google adapters no longer read
+``Settings.google_oauth_access_token`` directly — they hold a
+``TokenProvider`` and ask it for a currently-valid bearer per
+real-mode request. ``real_mode`` flips on iff a provider is wired.
+
+Two implementations:
+- ``StaticTokenProvider`` — returns an operator-wired bearer verbatim
+  (e.g. an OAuth Playground token in ``GOOGLE_OAUTH_ACCESS_TOKEN``).
+  No refresh; preserves the pre-port behaviour.
+- ``GoogleOAuthTokenProvider`` — exchanges a long-lived refresh token
+  for short-lived access tokens against ``oauth2.googleapis.com/token``,
+  caching each token until ``expiry_skew_seconds`` (default 60s)
+  before expiry. An ``asyncio.Lock`` collapses concurrent
+  expired-cache reads into a single refresh. Refresh failures redact
+  via ``safe_error_summary`` / ``safe_network_summary`` (M8 / M4) and
+  never interpolate the refresh token into an error message.
+
+``runtime._token_provider()`` picks highest-capability first: refresh
+trio (``GOOGLE_OAUTH_REFRESH_TOKEN`` + ``GOOGLE_OAUTH_CLIENT_ID`` +
+``GOOGLE_OAUTH_CLIENT_SECRET``) → ``GoogleOAuthTokenProvider``; static
+bearer only → ``StaticTokenProvider``; neither → ``None`` (mock mode).
+``build_default_registry`` threads the provider into the four Google
+adapters; direct construction without one falls back to a
+Settings-derived static bearer (test / dev affordance).
+
+New Settings field ``google_oauth_refresh_token`` (``SecretStr``).
+
+Tests: 23 in ``tests/test_token_provider.py`` (Static + GoogleOAuth
+refresh / caching / expiry-skew / error redaction) and
+``tests/test_token_provider_factory.py`` (factory selection, Settings
+masking, registry threading).
+
+Out of scope: rotating a refresh token that Google itself rotates on
+use; proactive background refresh (refresh is lazy, on first
+expired-cache read); 429 backoff on the token endpoint.

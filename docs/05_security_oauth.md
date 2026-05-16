@@ -8,7 +8,10 @@
 - Google Docs 提案文件
 - Google Sheets 任務矩陣
 - Google Calendar 行程
-- OAuth token
+- OAuth access token (short-lived bearer)
+- OAuth refresh token (long-lived — higher value; `SecretStr`, never
+  logged; refresh failures redacted, the token is never interpolated
+  into an error message)
 - Plane API token
 - GitHub PAT
 - Team member capacity data

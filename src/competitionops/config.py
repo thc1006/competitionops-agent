@@ -103,10 +103,18 @@ class Settings(BaseSettings):
     google_oauth_client_id: str | None = None
     google_oauth_client_secret: SecretStr | None = None
     google_oauth_redirect_uri: str = "http://localhost:8080/callback"
-    # P1-005 — short-lived bearer used by the Drive real adapter. Operators
-    # wire this from their own OAuth refresh loop (a TokenProvider port is a
-    # later step). SecretStr keeps it out of logs / model_dump output.
+    # Short-lived bearer for the Google real adapters. Operators paste a
+    # token minted out-of-band (e.g. the OAuth 2.0 Playground) and
+    # re-supply it when it expires. SecretStr keeps it out of logs /
+    # model_dump output. The refresh-token trio below is the
+    # zero-maintenance alternative — see ``runtime._token_provider``.
     google_oauth_access_token: SecretStr | None = None
+    # Long-lived OAuth refresh token. When set together with
+    # ``google_oauth_client_id`` + ``google_oauth_client_secret``,
+    # ``GoogleOAuthTokenProvider`` mints and auto-refreshes access
+    # tokens so a PM never re-pastes an hourly bearer. SecretStr —
+    # never logged / never in model_dump output.
+    google_oauth_refresh_token: SecretStr | None = None
     # Override the Drive API base URL for staging/self-hosted Drive shims.
     # Production uses the default ``https://www.googleapis.com``.
     google_drive_api_base: str = "https://www.googleapis.com"

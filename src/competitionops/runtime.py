@@ -38,11 +38,14 @@ from competitionops.adapters.memory_audit import InMemoryAuditLog
 from competitionops.adapters.memory_plan_store import InMemoryPlanRepository
 from competitionops.adapters.pdf_mock import MockPdfAdapter
 from competitionops.adapters.registry import AdapterRegistry, build_default_registry
+from competitionops.adapters.token_provider_google import GoogleOAuthTokenProvider
+from competitionops.adapters.token_provider_static import StaticTokenProvider
 from competitionops.config import get_settings
 from competitionops.ports import (
     AuditLogPort,
     PdfIngestionPort,
     PlanRepository,
+    TokenProvider,
     WebIngestionPort,
 )
 
@@ -90,11 +93,46 @@ def _audit_log() -> AuditLogPort:
 
 
 @lru_cache(maxsize=1)
+def _token_provider() -> TokenProvider | None:
+    """OAuth access-token provider singleton for the Google adapters.
+
+    Selection, highest-capability first:
+
+    - Refresh-token trio set (``GOOGLE_OAUTH_REFRESH_TOKEN`` +
+      ``GOOGLE_OAUTH_CLIENT_ID`` + ``GOOGLE_OAUTH_CLIENT_SECRET``) →
+      ``GoogleOAuthTokenProvider``: access tokens are minted and
+      refreshed automatically, so a PM never re-pastes an hourly bearer.
+    - Static bearer only (``GOOGLE_OAUTH_ACCESS_TOKEN``) →
+      ``StaticTokenProvider``: the operator re-supplies the token when
+      it expires (the pre-refresh-port behaviour).
+    - Neither → ``None``: the Google adapters stay in mock mode.
+
+    Shared by all four Google adapters via ``_registry`` →
+    ``build_default_registry``; ``GoogleOAuthTokenProvider`` holds an
+    ``asyncio.Lock`` so the shared instance is concurrency-safe.
+    """
+    s = get_settings()
+    if (
+        s.google_oauth_refresh_token is not None
+        and s.google_oauth_client_id
+        and s.google_oauth_client_secret is not None
+    ):
+        return GoogleOAuthTokenProvider(
+            client_id=s.google_oauth_client_id,
+            client_secret=s.google_oauth_client_secret.get_secret_value(),
+            refresh_token=s.google_oauth_refresh_token.get_secret_value(),
+        )
+    if s.google_oauth_access_token is not None:
+        return StaticTokenProvider(s.google_oauth_access_token.get_secret_value())
+    return None
+
+
+@lru_cache(maxsize=1)
 def _registry() -> AdapterRegistry:
     """Adapter registry singleton — the same mock-first + real-mode
     set every FastAPI request / MCP tool / workflow execute step uses.
     """
-    return build_default_registry()
+    return build_default_registry(token_provider=_token_provider())
 
 
 @lru_cache(maxsize=1)
