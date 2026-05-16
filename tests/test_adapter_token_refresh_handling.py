@@ -79,6 +79,19 @@ _ADAPTER_CASES = [
             "end": "2026-06-01T01:00:00+08:00",
         },
     ),
+    # Checkpoint series — the TokenRefreshError is raised inside
+    # create_event, called by create_checkpoint_series, and must
+    # propagate THROUGH create_checkpoint_series (which catches only
+    # httpx errors + _MissingEventIdError) up to execute()'s handler.
+    (
+        GoogleCalendarAdapter,
+        "google_calendar",
+        "google.calendar.create_checkpoint_series",
+        {
+            "competition_name": "Test Competition",
+            "deadline": "2026-09-05T23:59:00+08:00",
+        },
+    ),
 ]
 
 
