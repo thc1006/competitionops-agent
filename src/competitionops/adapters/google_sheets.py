@@ -58,6 +58,7 @@ from competitionops.adapters._http_errors import (
     safe_error_summary,
     safe_network_summary,
 )
+from competitionops.adapters.token_provider_google import TokenRefreshError
 from competitionops.adapters.token_provider_static import StaticTokenProvider
 from competitionops.config import Settings, get_settings
 from competitionops.ports import TokenProvider
@@ -340,6 +341,17 @@ class GoogleSheetsAdapter:
                     external_url=result["url"],
                     message=f"Updated cells ({self._mode_label()}).",
                 )
+        except TokenRefreshError as exc:
+            # The TokenProvider could not supply an access token (refresh
+            # token expired / revoked, OAuth endpoint down). ``exc`` carries
+            # a pre-redacted summary — safe to surface verbatim.
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_sheets",
+                status="failed",
+                error=str(exc),
+                message="Sheets adapter could not obtain an access token.",
+            )
         except KeyError as exc:
             return ExternalActionResult(
                 action_id=action.action_id,

@@ -11,6 +11,7 @@ from competitionops.adapters import (
     google_drive as drive_mod,
     google_sheets as sheets_mod,
     plane as plane_mod,
+    token_provider_google as token_provider_google_mod,
     web_crawl4ai as web_crawl4ai_mod,
     web_mock as web_mock_mod,
 )
@@ -336,7 +337,14 @@ def test_no_real_google_or_network_imports_in_adapter_modules() -> None:
                 f"{module.__name__} must not reference {needle!r}"
             )
 
-    for module in (drive_mod, docs_mod, sheets_mod, calendar_mod, plane_mod):
+    for module in (
+        drive_mod,
+        docs_mod,
+        sheets_mod,
+        calendar_mod,
+        plane_mod,
+        token_provider_google_mod,
+    ):
         _check(module, allow_httpx=True)
     for module in (web_mock_mod, web_crawl4ai_mod):
         _check(module, allow_httpx=False)

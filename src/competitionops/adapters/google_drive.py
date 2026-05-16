@@ -40,6 +40,7 @@ from competitionops.adapters._http_errors import (
     safe_error_summary,
     safe_network_summary,
 )
+from competitionops.adapters.token_provider_google import TokenRefreshError
 from competitionops.adapters.token_provider_static import StaticTokenProvider
 from competitionops.config import Settings, get_settings
 from competitionops.ports import TokenProvider
@@ -350,6 +351,17 @@ class GoogleDriveAdapter:
                     external_url=None,
                     message=f"Found {len(hits)} matches (mock).",
                 )
+        except TokenRefreshError as exc:
+            # The TokenProvider could not supply an access token (refresh
+            # token expired / revoked, OAuth endpoint down). ``exc`` carries
+            # a pre-redacted summary — safe to surface verbatim.
+            return ExternalActionResult(
+                action_id=action.action_id,
+                target_system="google_drive",
+                status="failed",
+                error=str(exc),
+                message="Drive adapter could not obtain an access token.",
+            )
         except KeyError as exc:
             return ExternalActionResult(
                 action_id=action.action_id,
